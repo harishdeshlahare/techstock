@@ -4,7 +4,7 @@ Stock search and chart data use Yahoo Finance. During development, browser reque
 
 ## Android/APK market-data setup
 
-The Vite development proxy is not included in a static build or APK. An APK therefore needs an internet-accessible HTTPS server that forwards `/api/yahoo/*` to `https://query1.finance.yahoo.com/*`, preserving the path and query string. In the app, open **Preferences**, enter the proxy URL (for example `https://your-server.com/api/yahoo`), save it, and use **Test market-data connection**. The setting is stored on the device. Do not enter the Yahoo Finance URL directly; the app expects the proxy route.
+The Vite development proxy is not included in a static build or APK. An APK therefore needs an internet-accessible HTTPS server that forwards `/api/yahoo/*` to `https://query1.finance.yahoo.com/*`, preserving the path and query string. In the app, open **Preferences**, enter your proxy server URL (for example `https://your-server.com`), save it, and use **Test market-data connection**. The app adds `/api/yahoo` to requests automatically; a URL ending in `/api/yahoo` is also accepted. The setting is stored on the device. Do not enter the Yahoo Finance URL directly; the app expects a separate proxy server.
 
 For a fixed proxy URL at build time, set `VITE_YAHOO_API_BASE_URL` to the complete proxy URL before running `npm run build`. A configured endpoint must be served over HTTPS outside localhost. Yahoo may still rate-limit or deny requests independently of the app.
 

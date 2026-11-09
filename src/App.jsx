@@ -5,7 +5,7 @@ import { buildTradeLevels, findSupportResistance } from './lib/levels.js';
 import { backtestSignals } from './lib/backtest.js';
 import { updateTradeHistory } from './lib/tradeHistory.js';
 import { getMarketStatus } from './lib/marketStatus.js';
-import { DEFAULT_YAHOO_API_BASE_URL, fetchYahooJson, getClosedCandles, getYahooSymbol, parseYahooCandles } from './lib/yahoo.js';
+import { DEFAULT_YAHOO_API_BASE_URL, fetchYahooJson, getClosedCandles, getYahooSymbol, normalizeYahooProxyUrl, parseYahooCandles } from './lib/yahoo.js';
 import { TRADING_THRESHOLDS } from './lib/config/costs.js';
 import ChartView from './components/ChartView.jsx';
 import TradeReportPanel from './components/TradeReportPanel.jsx';
@@ -241,7 +241,8 @@ function App() {
     return AVAILABLE_THEMES.includes(savedTheme) ? savedTheme : 'dark';
   });
   const [yahooApiBaseUrl, setYahooApiBaseUrl] = useState(
-    () => loadPreference('techstock-yahoo-api-base-url', DEFAULT_YAHOO_API_BASE_URL),
+    () => loadPreference('techstock-yahoo-api-base-url', DEFAULT_YAHOO_API_BASE_URL)
+      .replace(/\/api\/yahoo\/?$/, ''),
   );
   const [apiBaseDraft, setApiBaseDraft] = useState(yahooApiBaseUrl);
   const [preferencesMessage, setPreferencesMessage] = useState('');
@@ -357,29 +358,12 @@ function App() {
   }
 
   function savePreferences() {
-    let normalizedApiUrl = apiBaseDraft.trim().replace(/\/+$/, '');
-    if (normalizedApiUrl) {
-      let parsedUrl;
-      try {
-        parsedUrl = new URL(normalizedApiUrl);
-      } catch {
-        setPreferencesMessage('Enter a complete proxy URL, for example https://your-server.com/api/yahoo.');
-        return;
-      }
-
-      const localDevelopmentHost = ['localhost', '127.0.0.1'].includes(parsedUrl.hostname);
-      if (parsedUrl.protocol !== 'https:' && !(localDevelopmentHost && parsedUrl.protocol === 'http:')) {
-        setPreferencesMessage('Use HTTPS for the proxy URL. HTTP is allowed only for localhost testing.');
-        return;
-      }
-      if (parsedUrl.search || parsedUrl.hash) {
-        setPreferencesMessage('The proxy URL must not include a query string or fragment.');
-        return;
-      }
-      if (!parsedUrl.pathname.replace(/\/+$/, '').endsWith('/api/yahoo')) {
-        parsedUrl.pathname = `${parsedUrl.pathname.replace(/\/+$/, '')}/api/yahoo`;
-      }
-      normalizedApiUrl = parsedUrl.toString().replace(/\/+$/, '');
+    let normalizedApiUrl;
+    try {
+      normalizedApiUrl = normalizeYahooProxyUrl(apiBaseDraft);
+    } catch (error) {
+      setPreferencesMessage(error.message);
+      return;
     }
 
     try {
@@ -1314,12 +1298,12 @@ function App() {
                 autoCapitalize="none"
                 autoCorrect="off"
                 spellCheck="false"
-                placeholder="https://your-server.com/api/yahoo"
+                placeholder="https://your-server.com"
                 value={apiBaseDraft}
                 onChange={(event) => setApiBaseDraft(event.target.value)}
               />
               <small>
-                Required in a packaged APK. Use the HTTPS URL of a server that forwards /api/yahoo requests to Yahoo Finance. Vite’s local proxy is not included in an APK.
+                Required in a packaged APK. Enter your HTTPS proxy server URL, not query1.finance.yahoo.com. The app adds /api/yahoo to proxy requests automatically.
               </small>
             </label>
           </div>
