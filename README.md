@@ -38,7 +38,7 @@ Run `npm run dev` and open the local Vite URL. Keep the dev server running while
 
 The Vercel deployment uses a same-origin rewrite for `/api/yahoo/*` requests, forwarding them to `https://query1.finance.yahoo.com/*` while preserving the query string. The rewrite is configured in `vercel.json`. Other static hosts must configure an equivalent reverse proxy; a static build alone does not include one.
 
-Paper trading requires a separately deployed backend that implements `/api/paper-trading/*`. Set `VITE_BACKEND_API_BASE_URL` to that backend's HTTPS origin in the Vercel project settings and redeploy. This frontend repository does not currently include a deployable backend entrypoint; the paper-trading UI stays unavailable until a backend is configured.
+Paper trading uses `https://techstock-backend-gzws.onrender.com` by default. To use a different backend, set `VITE_BACKEND_API_BASE_URL` to its HTTPS origin in the Vercel project settings and redeploy. The backend must implement `/api/paper-trading/*`.
 
 ## Commands
 

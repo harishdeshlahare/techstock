@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react';
 
-const API_BASE = String(import.meta.env.VITE_BACKEND_API_BASE_URL || '').replace(/\/+$/, '');
+const API_BASE = String(
+  import.meta.env.VITE_BACKEND_API_BASE_URL || 'https://techstock-backend-gzws.onrender.com',
+).replace(/\/+$/, '');
 
 async function requestJson(path, options = {}) {
   const response = await fetch(`${API_BASE}${path}`, {
