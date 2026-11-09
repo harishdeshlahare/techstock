@@ -36,7 +36,7 @@ Run `npm run dev` and open the local Vite URL. Keep the dev server running while
 
 ## Deployment
 
-The Vercel deployment includes a same-origin `/api/yahoo/*` serverless proxy for Yahoo search and chart requests. Deploy the repository root so Vercel detects the `api/yahoo/[...path].js` function alongside the Vite frontend. Other static hosts must configure an equivalent reverse proxy to `https://query1.finance.yahoo.com`, preserving the path and query string; a static build alone does not include a proxy.
+The Vercel deployment includes a same-origin `/api/yahoo/*` serverless proxy for Yahoo search and chart requests. Deploy the repository root so Vercel detects the `api/[...path].js` function alongside the Vite frontend. Other static hosts must configure an equivalent reverse proxy to `https://query1.finance.yahoo.com`, preserving the path and query string; a static build alone does not include a proxy.
 
 ## Commands
 

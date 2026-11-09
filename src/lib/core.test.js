@@ -4,7 +4,7 @@ import { getMarketStatus } from './marketStatus.js';
 import { fetchYahooJson, getClosedCandles, getYahooSymbol, normalizeYahooProxyUrl, parseYahooCandles } from './yahoo.js';
 import { buildTradeReport } from './tradeReport.js';
 import { updateTradeHistory } from './tradeHistory.js';
-import yahooProxyHandler, { buildYahooTargetUrl } from '../../api/yahoo/[...path].js';
+import yahooProxyHandler, { buildYahooTargetUrl } from '../../api/[...path].js';
 
 afterEach(() => {
   vi.unstubAllGlobals();
