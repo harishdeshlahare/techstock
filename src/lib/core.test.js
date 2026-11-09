@@ -4,6 +4,7 @@ import { getMarketStatus } from './marketStatus.js';
 import { fetchYahooJson, getClosedCandles, getYahooSymbol, normalizeYahooProxyUrl, parseYahooCandles } from './yahoo.js';
 import { buildTradeReport } from './tradeReport.js';
 import { updateTradeHistory } from './tradeHistory.js';
+import { calculatePositionPnl, getPositionRiskStatus } from './paperTrading.js';
 import vercelConfig from '../../vercel.json';
 
 afterEach(() => {
@@ -84,6 +85,20 @@ describe('market-data utilities', () => {
       source: '/api/yahoo/:path*',
       destination: 'https://query1.finance.yahoo.com/:path*',
     });
+  });
+});
+
+describe('paper-trading calculations', () => {
+  it('calculates unrealized P&L only with a valid market price', () => {
+    expect(calculatePositionPnl({ quantity: 3, averagePrice: 100 }, 112)).toBe(36);
+    expect(calculatePositionPnl({ quantity: 3, averagePrice: 100 }, null)).toBeNull();
+  });
+
+  it('alerts on stop loss or target without implying an automatic exit', () => {
+    expect(getPositionRiskStatus(94, 95, 110)).toMatch(/Stop loss reached/);
+    expect(getPositionRiskStatus(111, 95, 110)).toMatch(/Target reached/);
+    expect(getPositionRiskStatus(100, 110, 105)).toMatch(/must be below target/);
+    expect(getPositionRiskStatus(100, 95, 110)).toBe('');
   });
 });
 

@@ -2422,6 +2422,21 @@ select {
   font-weight: 600;
 }
 
+.paper-risk-control input {
+  width: 92px;
+  min-width: 92px;
+  padding: 6px;
+}
+
+.paper-risk-alerts {
+  margin-top: 10px;
+  color: var(--warn);
+}
+
+.paper-risk-alerts p {
+  margin: 4px 0;
+}
+
 .paper-orders-section {
   margin-top: 14px;
 }

@@ -40,6 +40,8 @@ The Vercel deployment uses a same-origin rewrite for `/api/yahoo/*` requests, fo
 
 Paper trading uses `https://techstock-backend-gzws.onrender.com` by default. To use a different backend, set `VITE_BACKEND_API_BASE_URL` to its HTTPS origin in the Vercel project settings and redeploy. The backend must implement `/api/paper-trading/*`.
 
+In the Paper trading tab, open positions show live-fetch-based unrealized and total marked P&L, and **Sell all** submits a confirmed simulated sell at the latest fetched Yahoo price. Set stop-loss and target values per position to display an alert when the observed price reaches either level. These limits are stored in the current browser and do not automatically submit orders; keep the tab open to monitor them.
+
 ## Commands
 
 - `npm run dev` — start local development server with Yahoo proxy

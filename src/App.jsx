@@ -1623,6 +1623,8 @@ function App() {
           stock={selectedStock}
           currency={analysis?.currency || selectedStock.currency || (market === 'India' ? 'INR' : 'USD')}
           currentPrice={analysis?.price || watchlistQuotes[getYahooSymbol(selectedStock, market)]?.price}
+          market={market}
+          yahooApiBaseUrl={yahooApiBaseUrl}
         />
       )}
 
