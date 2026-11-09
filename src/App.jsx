@@ -1752,7 +1752,7 @@ function App() {
               </strong>
               {analysis.setupDirection && (
                 <>
-                  <span>Nearest S/R: {currencySymbol}{analysis.setupDirection === 'Long' ? analysis.supports[0]?.price ?? '—' : analysis.resistances[0]?.price ?? '—'}</span>
+                  <span>Nearest S/R: {currencySymbol}{(analysis.setupDirection === 'Long' ? analysis.supports[0]?.price : analysis.resistances[0]?.price)?.toFixed(2) ?? '—'}</span>
                   <span>Entry {currencySymbol}{entryPrice.toFixed(2)} · Stop {currencySymbol}{verdictTradeLevels.stop.toFixed(2)}</span>
                   <span>T1 {currencySymbol}{verdictTradeLevels.target1.toFixed(2)} · T2 {currencySymbol}{verdictTradeLevels.target2.toFixed(2)}</span>
                 </>
@@ -1805,7 +1805,7 @@ function App() {
                 <h3 className="support-heading">Support</h3>
                 {analysis.supports.map((level, index) => (
                   <div className="level-row" key={`support-${level.price}`}>
-                    <span>S{index + 1}</span><strong>{currencySymbol}{level.price}</strong><small>{level.touches} pivot touch{level.touches === 1 ? '' : 'es'}</small>
+                    <span>S{index + 1}</span><strong>{currencySymbol}{level.price.toFixed(2)}</strong><small>{level.touches} pivot touch{level.touches === 1 ? '' : 'es'}</small>
                   </div>
                 ))}
               </div>
@@ -1813,7 +1813,7 @@ function App() {
                 <h3 className="resistance-heading">Resistance</h3>
                 {analysis.resistances.map((level, index) => (
                   <div className="level-row" key={`resistance-${level.price}`}>
-                    <span>R{index + 1}</span><strong>{currencySymbol}{level.price}</strong><small>{level.touches} pivot touch{level.touches === 1 ? '' : 'es'}</small>
+                    <span>R{index + 1}</span><strong>{currencySymbol}{level.price.toFixed(2)}</strong><small>{level.touches} pivot touch{level.touches === 1 ? '' : 'es'}</small>
                   </div>
                 ))}
               </div>

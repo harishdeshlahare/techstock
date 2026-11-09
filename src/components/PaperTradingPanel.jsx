@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 
-const API_BASE = (import.meta.env.VITE_BACKEND_API_BASE_URL || '/api/backend').replace(/\/+$/, '');
+const API_BASE = String(import.meta.env.VITE_BACKEND_API_BASE_URL || '').replace(/\/+$/, '');
 
 async function requestJson(path, options = {}) {
   const response = await fetch(`${API_BASE}${path}`, {
@@ -58,12 +58,18 @@ export default function PaperTradingPanel({ stock, currency = 'USD', currentPric
   async function loadPortfolio() {
     setLoading(true);
     setError('');
+    if (!API_BASE) {
+      setError('Paper trading is unavailable: no backend is configured for this deployment. Deploy a TechStock backend and set VITE_BACKEND_API_BASE_URL to its HTTPS URL in Vercel, then redeploy.');
+      setLoading(false);
+      return;
+    }
+
     try {
       const data = await requestJson('/api/paper-trading/summary');
       setPortfolio(data.portfolio);
       setStartingCashSetting(String(data.portfolio.startingCash));
     } catch (requestError) {
-      setError(`${requestError.message} Confirm the Techstock backend is running on port 4000.`);
+      setError(`${requestError.message} Check that the configured backend is reachable and supports the paper-trading API.`);
     } finally {
       setLoading(false);
     }
@@ -128,7 +134,7 @@ export default function PaperTradingPanel({ stock, currency = 'USD', currentPric
           <h2>Paper trading</h2>
           <p>Practice with simulated market orders. Orders do not reach a broker.</p>
         </div>
-        <button type="button" className="secondary-button" onClick={loadPortfolio} disabled={loading}>
+        <button type="button" className="secondary-button" onClick={loadPortfolio} disabled={loading || !API_BASE}>
           {loading ? 'Refreshing…' : 'Refresh account'}
         </button>
       </div>
@@ -156,7 +162,7 @@ export default function PaperTradingPanel({ stock, currency = 'USD', currentPric
               required
             />
           </label>
-          <button type="submit" className="secondary-button" disabled={submitting || loading}>
+          <button type="submit" className="secondary-button" disabled={submitting || loading || !API_BASE}>
             {submitting ? 'Applying…' : 'Reset account to this amount'}
           </button>
         </form>
@@ -183,7 +189,7 @@ export default function PaperTradingPanel({ stock, currency = 'USD', currentPric
               <input type="number" min="0.000001" step="any" value={price} onChange={(event) => setPrice(event.target.value)} required />
             </label>
           </div>
-          <button type="submit" className="scan-button" disabled={submitting || loading}>
+          <button type="submit" className="scan-button" disabled={submitting || loading || !API_BASE}>
             {submitting ? 'Submitting…' : `Place paper ${side}`}
           </button>
           <p className="subtle-note">Execution price is entered manually (prefilled from the selected chart when available). No live order routing or automatic quote fill.</p>
