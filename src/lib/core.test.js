@@ -4,6 +4,7 @@ import { getMarketStatus } from './marketStatus.js';
 import { fetchYahooJson, getClosedCandles, getYahooSymbol, normalizeYahooProxyUrl, parseYahooCandles } from './yahoo.js';
 import { buildTradeReport } from './tradeReport.js';
 import { updateTradeHistory } from './tradeHistory.js';
+import yahooProxyHandler, { buildYahooTargetUrl } from '../../api/yahoo/[...path].js';
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -76,6 +77,38 @@ describe('market-data utilities', () => {
       'https://proxy.example.com/api/yahoo/v1/finance/search?q=MSFT',
       { signal: undefined, cache: 'no-store' },
     );
+  });
+
+  it('routes Vercel Yahoo requests to the fixed upstream and preserves the query', () => {
+    expect(buildYahooTargetUrl('/api/yahoo/v8/finance/chart/AAPL?interval=1d&range=5d').toString())
+      .toBe('https://query1.finance.yahoo.com/v8/finance/chart/AAPL?interval=1d&range=5d');
+    expect(() => buildYahooTargetUrl('/api/yahoo/https://example.com')).toThrow(/Unsupported Yahoo Finance endpoint/);
+  });
+
+  it('forwards Yahoo responses from the Vercel function', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      status: 200,
+      headers: { get: () => 'application/json; charset=utf-8' },
+      text: async () => '{"finance":{"result":[]}}',
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const response = {
+      headers: {},
+      setHeader(name, value) { this.headers[name] = value; },
+      end(body) { this.body = body; },
+    };
+
+    await yahooProxyHandler({
+      method: 'GET',
+      url: '/api/yahoo/v1/finance/search?q=AAPL',
+    }, response);
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      new URL('https://query1.finance.yahoo.com/v1/finance/search?q=AAPL'),
+      { headers: { Accept: 'application/json' }, cache: 'no-store' },
+    );
+    expect(response.statusCode).toBe(200);
+    expect(response.body).toBe('{"finance":{"result":[]}}');
   });
 });
 
