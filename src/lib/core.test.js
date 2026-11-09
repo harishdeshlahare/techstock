@@ -4,7 +4,13 @@ import { getMarketStatus } from './marketStatus.js';
 import { fetchYahooJson, getClosedCandles, getYahooSymbol, normalizeYahooProxyUrl, parseYahooCandles } from './yahoo.js';
 import { buildTradeReport } from './tradeReport.js';
 import { updateTradeHistory } from './tradeHistory.js';
-import { calculatePositionPnl, getPositionRiskStatus } from './paperTrading.js';
+import {
+  calculatePositionPnl,
+  createPaperPortfolio,
+  executePaperOrder,
+  getPaperAccountStorageKey,
+  getPositionRiskStatus,
+} from './paperTrading.js';
 import vercelConfig from '../../vercel.json';
 
 afterEach(() => {
@@ -89,6 +95,31 @@ describe('market-data utilities', () => {
 });
 
 describe('paper-trading calculations', () => {
+  it('uses separate storage keys and ledgers for US and India', () => {
+    expect(getPaperAccountStorageKey('India')).not.toBe(getPaperAccountStorageKey('United States'));
+    const us = createPaperPortfolio();
+    const india = createPaperPortfolio();
+    const boughtIndia = executePaperOrder(india, { symbol: 'TCS', side: 'buy', quantity: 2, price: 100 });
+
+    expect(us.cash).toBe(100_000);
+    expect(us.positions).toEqual({});
+    expect(boughtIndia.cash).toBe(99_800);
+    expect(boughtIndia.positions.TCS.quantity).toBe(2);
+  });
+
+  it('validates funds and quantity when buying and selling', () => {
+    const account = createPaperPortfolio(1_000);
+    const bought = executePaperOrder(account, { symbol: 'AAPL', side: 'buy', quantity: 2, price: 100 });
+    const sold = executePaperOrder(bought, { symbol: 'AAPL', side: 'sell', quantity: 1, price: 120 });
+
+    expect(sold.cash).toBe(920);
+    expect(sold.positions.AAPL.quantity).toBe(1);
+    expect(() => executePaperOrder(account, { symbol: 'AAPL', side: 'buy', quantity: 11, price: 100 }))
+      .toThrow(/Insufficient/);
+    expect(() => executePaperOrder(sold, { symbol: 'AAPL', side: 'sell', quantity: 2, price: 100 }))
+      .toThrow(/Not enough/);
+  });
+
   it('calculates unrealized P&L only with a valid market price', () => {
     expect(calculatePositionPnl({ quantity: 3, averagePrice: 100 }, 112)).toBe(36);
     expect(calculatePositionPnl({ quantity: 3, averagePrice: 100 }, null)).toBeNull();

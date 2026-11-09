@@ -1,37 +1,51 @@
 import { useEffect, useState } from 'react';
 import { fetchYahooJson, getYahooSymbol } from '../lib/yahoo.js';
-import { calculatePositionPnl, getPositionRiskStatus } from '../lib/paperTrading.js';
+import {
+  calculatePositionPnl,
+  createPaperPortfolio,
+  executePaperOrder,
+  getPaperAccountStorageKey,
+  getPositionRiskStatus,
+} from '../lib/paperTrading.js';
 
-const API_BASE = String(
-  import.meta.env.VITE_BACKEND_API_BASE_URL || 'https://techstock-backend-gzws.onrender.com',
-).replace(/\/+$/, '');
-const RISK_LIMITS_STORAGE_KEY = 'techstock-paper-risk-limits';
-
-function readRiskLimits() {
+function readLocalPortfolio(market) {
   try {
-    const saved = window.localStorage.getItem(RISK_LIMITS_STORAGE_KEY);
-    const parsed = saved ? JSON.parse(saved) : {};
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+    const saved = window.localStorage.getItem(getPaperAccountStorageKey(market));
+    if (!saved) return { portfolio: createPaperPortfolio(), error: '' };
+    const portfolio = JSON.parse(saved);
+    if (!portfolio || !Number.isFinite(Number(portfolio.startingCash)) ||
+        !Number.isFinite(Number(portfolio.cash)) || !portfolio.positions || !Array.isArray(portfolio.orders)) {
+      throw new Error('Saved account has an invalid format.');
+    }
+    return { portfolio, error: '' };
   } catch (error) {
-    console.error('Unable to load saved paper-trading risk limits:', error);
-    return {};
+    console.error(`Unable to load the ${market} paper-trading account:`, error);
+    return {
+      portfolio: createPaperPortfolio(),
+      error: `Unable to load the saved ${market} paper account. Your data was not overwritten: ${error.message}`,
+    };
   }
 }
 
-async function requestJson(path, options = {}) {
-  const response = await fetch(`${API_BASE}${path}`, {
-    headers: {
-      Accept: 'application/json',
-      ...(options.body ? { 'Content-Type': 'application/json' } : {}),
-      ...(options.headers || {}),
-    },
-    ...options,
-  });
-  const payload = await response.json().catch(() => null);
-  if (!response.ok) {
-    throw new Error(payload?.error || `Backend request failed (HTTP ${response.status}).`);
+function saveLocalPortfolio(market, portfolio) {
+  try {
+    window.localStorage.setItem(getPaperAccountStorageKey(market), JSON.stringify(portfolio));
+  } catch (error) {
+    console.error(`Unable to save the ${market} paper-trading account:`, error);
+    throw new Error(`Unable to save the ${market} paper account in this browser: ${error.message}`);
   }
-  return payload;
+}
+
+function readRiskLimits(market) {
+  try {
+    const key = `techstock-paper-risk-limits-${market === 'India' ? 'india' : 'us'}`;
+    const saved = window.localStorage.getItem(key);
+    const parsed = saved ? JSON.parse(saved) : {};
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch (error) {
+    console.error(`Unable to load ${market} paper-trading risk limits:`, error);
+    return {};
+  }
 }
 
 function formatMoney(value, currency) {
@@ -56,15 +70,17 @@ export default function PaperTradingPanel({
   market = 'United States',
   yahooApiBaseUrl = '',
 }) {
-  const [portfolio, setPortfolio] = useState(null);
+  const [initialAccount] = useState(() => readLocalPortfolio(market));
+  const [portfolio, setPortfolio] = useState(initialAccount.portfolio);
+  const [accountLoadError, setAccountLoadError] = useState(initialAccount.error);
   const [marketQuoteState, setMarketQuoteState] = useState({ symbolsKey: '', prices: {}, errors: {} });
-  const [riskLimits, setRiskLimits] = useState(readRiskLimits);
-  const [startingCashSetting, setStartingCashSetting] = useState('100000');
+  const [riskLimits, setRiskLimits] = useState(() => readRiskLimits(market));
+  const [startingCashSetting, setStartingCashSetting] = useState(String(initialAccount.portfolio.startingCash));
   const [symbol, setSymbol] = useState(stock?.symbol || '');
   const [side, setSide] = useState('buy');
   const [quantity, setQuantity] = useState('1');
   const [price, setPrice] = useState(Number.isFinite(Number(currentPrice)) ? String(currentPrice) : '');
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
@@ -79,40 +95,29 @@ export default function PaperTradingPanel({
     }
   }, [currentPrice]);
 
-  async function loadPortfolio() {
+  function loadPortfolio() {
     setLoading(true);
     setError('');
-    if (!API_BASE) {
-      setError('Paper trading is unavailable: no backend is configured for this deployment. Deploy a TechStock backend and set VITE_BACKEND_API_BASE_URL to its HTTPS URL in Vercel, then redeploy.');
-      setLoading(false);
-      return;
-    }
-
     try {
-      const data = await requestJson('/api/paper-trading/summary');
-      setPortfolio(data.portfolio);
-      setStartingCashSetting(String(data.portfolio.startingCash));
-    } catch (requestError) {
-      setError(`${requestError.message} Check that the configured backend is reachable and supports the paper-trading API.`);
+      const account = readLocalPortfolio(market);
+      setPortfolio(account.portfolio);
+      setStartingCashSetting(String(account.portfolio.startingCash));
+      setAccountLoadError(account.error);
+      if (account.error) setError(account.error);
     } finally {
       setLoading(false);
     }
   }
 
-  useEffect(() => {
-    loadPortfolio();
-  }, []);
-
-  async function executeOrder(order) {
+  function executeOrder(order) {
     setSubmitting(true);
     setError('');
     setMessage('');
     try {
-      const data = await requestJson('/api/paper-trading/orders', {
-        method: 'POST',
-        body: JSON.stringify(order),
-      });
-      setPortfolio(data.portfolio);
+      if (accountLoadError) throw new Error(accountLoadError);
+      const updatedPortfolio = executePaperOrder(portfolio, order);
+      saveLocalPortfolio(market, updatedPortfolio);
+      setPortfolio(updatedPortfolio);
       setMessage(`${order.side === 'buy' ? 'Bought' : 'Sold'} ${order.quantity} ${order.symbol.toUpperCase()} at ${formatMoney(order.price, currency)} (simulated).`);
     } catch (requestError) {
       setError(requestError.message);
@@ -121,9 +126,9 @@ export default function PaperTradingPanel({
     }
   }
 
-  async function submitOrder(event) {
+  function submitOrder(event) {
     event.preventDefault();
-    await executeOrder({
+    executeOrder({
       symbol: symbol.trim(),
       side,
       quantity: Number(quantity),
@@ -131,14 +136,14 @@ export default function PaperTradingPanel({
     });
   }
 
-  async function sellPosition(position) {
+  function sellPosition(position) {
     const salePrice = marketPrices[position.symbol];
     if (!Number.isFinite(salePrice) || salePrice <= 0) {
       setError(`Cannot sell ${position.symbol}: a current market price is unavailable.`);
       return;
     }
     if (!window.confirm(`Sell all ${position.quantity} ${position.symbol} at ${formatMoney(salePrice, currency)}?`)) return;
-    await executeOrder({
+    executeOrder({
       symbol: position.symbol,
       side: 'sell',
       quantity: Number(position.quantity),
@@ -153,7 +158,7 @@ export default function PaperTradingPanel({
     }));
   }
 
-  async function resetAccount(event) {
+  function resetAccount(event) {
     event.preventDefault();
     if (!window.confirm('Reset paper account? This clears all open positions and simulated order history.')) return;
 
@@ -161,12 +166,11 @@ export default function PaperTradingPanel({
     setMessage('');
     setSubmitting(true);
     try {
-      const data = await requestJson('/api/paper-trading/reset', {
-        method: 'PUT',
-        body: JSON.stringify({ startingCash: Number(startingCashSetting) }),
-      });
-      setPortfolio(data.portfolio);
-      setMessage(`Paper account reset to ${formatMoney(data.portfolio.startingCash, currency)}.`);
+      if (accountLoadError) throw new Error(accountLoadError);
+      const newPortfolio = createPaperPortfolio(Number(startingCashSetting));
+      saveLocalPortfolio(market, newPortfolio);
+      setPortfolio(newPortfolio);
+      setMessage(`Paper account reset to ${formatMoney(newPortfolio.startingCash, currency)}.`);
     } catch (requestError) {
       setError(requestError.message);
     } finally {
@@ -190,11 +194,12 @@ export default function PaperTradingPanel({
 
   useEffect(() => {
     try {
-      window.localStorage.setItem(RISK_LIMITS_STORAGE_KEY, JSON.stringify(riskLimits));
+      const key = `techstock-paper-risk-limits-${market === 'India' ? 'india' : 'us'}`;
+      window.localStorage.setItem(key, JSON.stringify(riskLimits));
     } catch (error) {
-      console.error('Unable to save paper-trading risk limits:', error);
+      console.error(`Unable to save ${market} paper-trading risk limits:`, error);
     }
-  }, [riskLimits]);
+  }, [riskLimits, market]);
 
   useEffect(() => {
     if (!positionSymbols) return undefined;
@@ -251,12 +256,12 @@ export default function PaperTradingPanel({
           <h2>Paper trading</h2>
           <p>Practice with simulated market orders. Orders do not reach a broker.</p>
         </div>
-        <button type="button" className="secondary-button" onClick={loadPortfolio} disabled={loading || !API_BASE}>
+        <button type="button" className="secondary-button" onClick={loadPortfolio} disabled={loading}>
           {loading ? 'Refreshing…' : 'Refresh account'}
         </button>
       </div>
 
-      {error && <p className="scanner-error" role="alert">{error}</p>}
+      {(accountLoadError || error) && <p className="scanner-error" role="alert">{error || accountLoadError}</p>}
       {message && <p className="history-message" role="status">{message}</p>}
 
       <div className="metrics-grid paper-summary-grid">
@@ -281,7 +286,7 @@ export default function PaperTradingPanel({
               required
             />
           </label>
-          <button type="submit" className="secondary-button" disabled={submitting || loading || !API_BASE}>
+          <button type="submit" className="secondary-button" disabled={submitting || loading || Boolean(accountLoadError)}>
             {submitting ? 'Applying…' : 'Reset account to this amount'}
           </button>
         </form>
@@ -308,7 +313,7 @@ export default function PaperTradingPanel({
               <input type="number" min="0.000001" step="any" value={price} onChange={(event) => setPrice(event.target.value)} required />
             </label>
           </div>
-          <button type="submit" className="scan-button" disabled={submitting || loading || !API_BASE}>
+          <button type="submit" className="scan-button" disabled={submitting || loading || Boolean(accountLoadError)}>
             {submitting ? 'Submitting…' : `Place paper ${side}`}
           </button>
           <p className="subtle-note">Execution price is entered manually (prefilled from the selected chart when available). No live order routing or automatic quote fill.</p>
@@ -347,7 +352,7 @@ export default function PaperTradingPanel({
                           <input type="number" min="0" step="any" placeholder="Off" value={positionRisk.target || ''} onChange={(event) => updateRiskLimit(position.symbol, 'target', event.target.value)} />
                         </label>
                       </td>
-                      <td><button type="button" className="secondary-button" disabled={submitting || loading || !Number.isFinite(marketPrice)} onClick={() => sellPosition(position)}>Sell all</button></td>
+                      <td><button type="button" className="secondary-button" disabled={submitting || loading || Boolean(accountLoadError) || !Number.isFinite(marketPrice)} onClick={() => sellPosition(position)}>Sell all</button></td>
                     </tr>
                   );
                 })}</tbody>
@@ -392,7 +397,7 @@ export default function PaperTradingPanel({
         ) : <p className="history-empty">{loading ? 'Loading orders…' : 'Your paper order history will appear here.'}</p>}
       </section>
 
-      <p className="subtle-note paper-disclaimer">Stop-loss and target levels are saved in this browser and only show alerts; they do not automatically place orders. Sell all submits a simulated sell at the latest fetched Yahoo price after confirmation. Market data may be delayed or unavailable. The backend paper ledger resets when its server restarts.</p>
+      <p className="subtle-note paper-disclaimer">{market} paper-trading account is stored separately in this browser from the other market and is not shared across browsers or devices. Stop-loss and target levels are alerts only and do not automatically place orders. Sell all submits a confirmed simulated sell at the latest fetched Yahoo price. Market data may be delayed or unavailable.</p>
     </section>
   );
 }
