@@ -1145,6 +1145,8 @@ select {
 .legend-vwap { background: #ffd54f; }
 .legend-support { background: #26a69a; }
 .legend-resistance { background: #ef5350; }
+.legend-fvg { background: var(--accent); }
+.legend-order-block { background: var(--up); }
 
 @media (max-width: 700px) {
   .app-shell {

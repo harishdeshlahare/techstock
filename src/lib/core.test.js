@@ -4,6 +4,9 @@ import { getMarketStatus } from './marketStatus.js';
 import { fetchYahooJson, getClosedCandles, getYahooSymbol, normalizeYahooProxyUrl, parseYahooCandles } from './yahoo.js';
 import { buildTradeReport } from './tradeReport.js';
 import { updateTradeHistory } from './tradeHistory.js';
+import { searchIndianIndices } from './indices.js';
+import { getPriceActionContext } from './priceAction.js';
+import viteConfig from '../../vite.config.js';
 import {
   calculatePositionPnl,
   createPaperPortfolio,
@@ -33,6 +36,52 @@ describe('market-data utilities', () => {
     expect(calculateATR(candles, 1).at(-1)).toEqual({ time: 3, value: 3 });
   });
 
+  it('detects an unmitigated bullish FVG retest without using future candles', () => {
+    const candles = [
+      { time: 1, open: 9.5, high: 10, low: 9, close: 9.8, volume: 1 },
+      { time: 2, open: 10, high: 11, low: 9.8, close: 10.7, volume: 1 },
+      { time: 3, open: 11.5, high: 13, low: 12, close: 12.5, volume: 1 },
+      { time: 4, open: 12.2, high: 13, low: 11, close: 12.6, volume: 1 },
+    ];
+
+    expect(getPriceActionContext(candles, 2).bullishFvg).toBeNull();
+    const context = getPriceActionContext(candles);
+    expect(context.bullishFvg).toMatchObject({ lower: 10, upper: 12, formedAt: 2 });
+    expect(context.longFvgRetest).toBe(true);
+    expect(context.longRetest).toBe(true);
+  });
+
+  it('invalidates an FVG after price trades through the full gap', () => {
+    const candles = [
+      { time: 1, open: 9.5, high: 10, low: 9, close: 9.8, volume: 1 },
+      { time: 2, open: 10, high: 11, low: 9.8, close: 10.7, volume: 1 },
+      { time: 3, open: 11.5, high: 13, low: 12, close: 12.5, volume: 1 },
+      { time: 4, open: 12.2, high: 13, low: 11, close: 12.6, volume: 1 },
+      { time: 5, open: 10, high: 10.5, low: 9.5, close: 10.2, volume: 1 },
+      { time: 6, open: 10.2, high: 10.8, low: 10, close: 10.5, volume: 1 },
+    ];
+
+    expect(getPriceActionContext(candles).bullishFvg).toBeNull();
+    expect(getPriceActionContext(candles).longFvgRetest).toBe(false);
+  });
+
+  it('requires a structure-breaking displacement and confirmed order-block retest', () => {
+    const candles = [
+      { time: 1, open: 10, high: 11, low: 9, close: 10, volume: 1 },
+      { time: 2, open: 10.1, high: 11.5, low: 9.8, close: 11, volume: 1 },
+      { time: 3, open: 11, high: 12, low: 10.5, close: 11.6, volume: 1 },
+      { time: 4, open: 11.5, high: 12, low: 10.8, close: 11, volume: 1 },
+      { time: 5, open: 11, high: 12.5, low: 10.7, close: 12, volume: 1 },
+      { time: 6, open: 12, high: 12.8, low: 11.5, close: 11.8, volume: 1 },
+      { time: 7, open: 12.1, high: 14.4, low: 12, close: 14, volume: 1 },
+      { time: 8, open: 12.2, high: 13.3, low: 12, close: 13.1, volume: 1 },
+    ];
+    const context = getPriceActionContext(candles);
+
+    expect(context.bullishOrderBlock).toMatchObject({ lower: 11.5, upper: 12.8, formedAt: 6 });
+    expect(context.longOrderBlockRetest).toBe(true);
+  });
+
   it('parses Yahoo candles and excludes the unfinished daily candle', () => {
     const today = Date.UTC(2026, 10, 9) / 1000;
     const result = {
@@ -55,8 +104,17 @@ describe('market-data utilities', () => {
   it('maps Indian equities to Yahoo suffixes and respects exchange sessions', () => {
     expect(getYahooSymbol({ symbol: 'TCS', exchange: 'NSE' }, 'India')).toBe('TCS.NS');
     expect(getYahooSymbol({ symbol: '500325', exchange: 'BSE' }, 'India')).toBe('500325.BO');
+    expect(getYahooSymbol({ symbol: 'NIFTY', exchange: 'NSE', yahooSymbol: '^NSEI' }, 'India')).toBe('^NSEI');
+    expect(getYahooSymbol({ symbol: 'BANKNIFTY', exchange: 'NSE', yahooSymbol: '^NSEBANK' }, 'India')).toBe('^NSEBANK');
+    expect(getYahooSymbol({ symbol: 'SENSEX', exchange: 'BSE', yahooSymbol: '^BSESN' }, 'India')).toBe('^BSESN');
     expect(getMarketStatus('India', { open: 100, close: 200 }, 150_000)).toBe(true);
     expect(getMarketStatus('India', { open: 100, close: 200 }, 200_000)).toBe(false);
+  });
+
+  it('finds Indian indices by common names and ticker aliases', () => {
+    expect(searchIndianIndices('NIFTY').map((index) => index.id)).toEqual(['nifty', 'banknifty']);
+    expect(searchIndianIndices('bank nifty').map((index) => index.id)).toEqual(['banknifty']);
+    expect(searchIndianIndices('SENSEX').map((index) => index.yahooSymbol)).toEqual(['^BSESN']);
   });
 
   it('normalizes a proxy base URL and rejects Yahoo as the proxy host', () => {
@@ -91,6 +149,26 @@ describe('market-data utilities', () => {
       source: '/api/yahoo/:path*',
       destination: 'https://query1.finance.yahoo.com/:path*',
     });
+  });
+
+  it('routes Vite dev and preview Yahoo API requests to Yahoo Finance', () => {
+    for (const proxy of [viteConfig.server.proxy, viteConfig.preview.proxy]) {
+      expect(proxy['/api/yahoo'].target).toBe('https://query1.finance.yahoo.com');
+      expect(proxy['/api/yahoo'].rewrite('/api/yahoo/v8/finance/chart/AAPL')).toBe('/v8/finance/chart/AAPL');
+    }
+  });
+
+  it('explains when a Yahoo proxy returns HTML instead of JSON', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => {
+        throw new SyntaxError("Unexpected token '<'");
+      },
+    }));
+
+    await expect(fetchYahooJson('/api/yahoo/v1/finance/search?q=AAPL'))
+      .rejects.toThrow(/non-JSON response.*Verify that \/api\/yahoo is routed to Yahoo Finance/);
   });
 });
 

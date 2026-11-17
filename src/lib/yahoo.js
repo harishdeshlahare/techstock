@@ -60,7 +60,13 @@ export async function fetchYahooJson(path, baseUrl = '', options = {}) {
   try {
     payload = await response.json();
   } catch (error) {
-    throw new Error(`Yahoo Finance returned an invalid response (HTTP ${response.status}).`, { cause: error });
+    const message = response.ok
+      ? `Yahoo Finance proxy returned a non-JSON response (HTTP ${response.status}). Verify that /api/yahoo is routed to Yahoo Finance, not the app's HTML page.`
+      : `Yahoo Finance returned a non-JSON error response (HTTP ${response.status}). Verify the /api/yahoo proxy; Yahoo may also be throttling or denying this request.`;
+    throw new Error(
+      message,
+      { cause: error },
+    );
   }
   if (!response.ok) {
     const detail = payload?.chart?.error?.description || payload?.finance?.error?.description;
@@ -71,6 +77,8 @@ export async function fetchYahooJson(path, baseUrl = '', options = {}) {
 }
 
 export function getYahooSymbol(stock, market) {
+  const yahooSymbol = String(stock?.yahooSymbol || '').trim();
+  if (yahooSymbol) return yahooSymbol;
   const symbol = String(stock?.symbol || '').trim().toUpperCase();
   if (!symbol) return '';
   if (symbol.includes('.')) return symbol;

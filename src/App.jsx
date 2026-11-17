@@ -5,7 +5,9 @@ import { buildTradeLevels, findSupportResistance } from './lib/levels.js';
 import { backtestSignals } from './lib/backtest.js';
 import { updateTradeHistory } from './lib/tradeHistory.js';
 import { getMarketStatus } from './lib/marketStatus.js';
+import { getPriceActionContext } from './lib/priceAction.js';
 import { DEFAULT_YAHOO_API_BASE_URL, fetchYahooJson, getClosedCandles, getYahooSymbol, normalizeYahooProxyUrl, parseYahooCandles } from './lib/yahoo.js';
+import { INDIAN_INDICES, searchIndianIndices } from './lib/indices.js';
 import { TRADING_THRESHOLDS } from './lib/config/costs.js';
 import ChartView from './components/ChartView.jsx';
 import TradeReportPanel from './components/TradeReportPanel.jsx';
@@ -64,12 +66,6 @@ const SCANNER_THRESHOLDS = {
   rsiMin: 40,
   rsiMax: 65,
 };
-
-const INDEX_OPTIONS = [
-  { id: 'nifty', name: 'NIFTY 50', exchange: 'NSE', symbol: 'NIFTY', url: 'https://www.nseindia.com/option-chain' },
-  { id: 'banknifty', name: 'NIFTY BANK', exchange: 'NSE', symbol: 'BANKNIFTY', url: 'https://www.nseindia.com/option-chain' },
-  { id: 'sensex', name: 'SENSEX', exchange: 'BSE', symbol: 'SENSEX', url: 'https://www.bseindia.com/markets/Derivatives/DeriReports/OptionChain.html' },
-];
 
 function loadCustomScannerStocks() {
   try {
@@ -408,6 +404,12 @@ function App() {
     setSearchResults([]);
 
     try {
+      const matchingIndices = market === 'India' ? searchIndianIndices(query) : [];
+      if (matchingIndices.length) {
+        setSearchResults(matchingIndices);
+        return;
+      }
+
       const params = new URLSearchParams({ q: query, quotesCount: '30', newsCount: '0' });
       const data = await fetchYahooJson(`/api/yahoo/v1/finance/search?${params}`, yahooApiBaseUrl);
 
@@ -706,6 +708,20 @@ function App() {
         axisLabelVisible: true, title: `D-R${index + 1}`,
       }));
     }
+    (data.priceActionZones || []).forEach((zone) => {
+      const color = zone.type === 'FVG'
+        ? themeColor(zone.direction === 'Long' ? '--accent' : '--warn')
+        : themeColor(zone.direction === 'Long' ? '--up' : '--down');
+      const prefix = zone.type === 'FVG' ? 'FVG' : 'OB';
+      [zone.lower, zone.upper].forEach((price, index) => addLine(series.candleSeries, {
+        price,
+        color,
+        lineWidth: 1,
+        lineStyle: 3,
+        axisLabelVisible: true,
+        title: `${prefix} ${zone.direction === 'Long' ? '↑' : '↓'} ${index ? 'U' : 'L'}`,
+      }));
+    });
     const lineEntry = Number(analysis?.price || 0);
     const currentLevels = analysis
       ? buildTradeLevels({
@@ -868,13 +884,23 @@ function App() {
         const currentTrend = getTrend(signalCandles, { interval: timeframe, timeZone });
         const higherTrend = getTrend(higherCandles, { interval: higherLabel, timeZone });
         const lastVwap = vwap.find((point) => point.time === lastCandle.time)?.value ?? null;
+        const priceAction = getPriceActionContext(signalCandles);
+        const priceActionZones = [
+          priceAction.bullishFvg,
+          priceAction.bearishFvg,
+          priceAction.bullishOrderBlock,
+          priceAction.bearishOrderBlock,
+        ].filter(Boolean);
         const nearestSupport = levels.supports.find((level) => level.price < lastClose);
         const nearestResistance = levels.resistances.find((level) => level.price > lastClose);
         const nearSupport = nearestSupport && lastClose - nearestSupport.price <= Math.max(lastAtr * 0.5, lastClose * 0.002);
         const nearResistance = nearestResistance && nearestResistance.price - lastClose <= Math.max(lastAtr * 0.5, lastClose * 0.002);
-        const bullishSignal = Boolean(nearSupport && lastCandle.close > lastCandle.open && lastEma9 >= lastEma21);
-        const bearishSignal = Boolean(nearResistance && lastCandle.close < lastCandle.open && lastEma9 <= lastEma21);
-        // Keep the original component weights while scoring each direction independently.
+        const bullishSignal = Boolean(
+          nearSupport && lastCandle.close > lastCandle.open && lastEma9 >= lastEma21 && priceAction.longRetest,
+        );
+        const bearishSignal = Boolean(
+          nearResistance && lastCandle.close < lastCandle.open && lastEma9 <= lastEma21 && priceAction.shortRetest,
+        );
         const directionPoints = (direction) => {
           const isLong = direction === 'Long';
           const trendMatch = currentTrend === (isLong ? 'Bullish' : 'Bearish') && higherTrend === currentTrend;
@@ -883,29 +909,44 @@ function App() {
           const levelNear = isLong ? nearSupport : nearResistance;
           const signalMatch = isLong ? bullishSignal : bearishSignal;
           const rsiMatch = isLong ? lastRsi >= 50 && lastRsi <= 70 : lastRsi >= 30 && lastRsi <= 50;
+          const fvgRetest = isLong ? priceAction.longFvgRetest : priceAction.shortFvgRetest;
+          const orderBlockRetest = isLong ? priceAction.longOrderBlockRetest : priceAction.shortOrderBlockRetest;
+          const priceActionPoints = fvgRetest && orderBlockRetest ? 25
+            : fvgRetest || orderBlockRetest ? 15
+              : 0;
           return [
-            { label: 'Trend alignment', points: trendMatch ? 25 : 0, maxPoints: 25, reason: trendMatch ? `${currentTrend} chart and ${higherLabel} trends agree.` : 'Chart and higher-timeframe trends do not align.' },
-            { label: 'EMA alignment', points: emaMatch ? 15 : 0, maxPoints: 15, reason: emaMatch ? `EMA 9 is aligned for ${direction.toLowerCase()}.` : 'EMA 9/21 alignment does not support this direction.' },
-            { label: 'VWAP side', points: vwapMatch ? 15 : 0, maxPoints: 15, reason: lastVwap === null ? 'VWAP unavailable for this timeframe.' : vwapMatch ? `Price is on the ${direction.toLowerCase()} side of VWAP.` : 'Price is on the opposing side of VWAP.' },
-            { label: 'S/R confirmation', points: signalMatch ? 25 : levelNear ? 12 : 0, maxPoints: 25, reason: signalMatch ? `Confirmed ${direction.toLowerCase()} candle near structure.` : levelNear ? 'Near a level without full candle confirmation.' : 'No nearby confirming level.' },
-            { label: 'RSI', points: rsiMatch ? 20 : 0, maxPoints: 20, reason: rsiMatch ? `RSI ${lastRsi.toFixed(1)} supports ${direction.toLowerCase()} conditions.` : `RSI ${lastRsi.toFixed(1)} is outside the directional range.` },
+            { label: 'Trend alignment', points: trendMatch ? 20 : 0, maxPoints: 20, reason: trendMatch ? `${currentTrend} chart and ${higherLabel} trends agree.` : 'Chart and higher-timeframe trends do not align.' },
+            { label: 'EMA alignment', points: emaMatch ? 10 : 0, maxPoints: 10, reason: emaMatch ? `EMA 9 is aligned for ${direction.toLowerCase()}.` : 'EMA 9/21 alignment does not support this direction.' },
+            { label: 'VWAP side', points: vwapMatch ? 10 : 0, maxPoints: 10, reason: lastVwap === null ? 'VWAP unavailable for this timeframe.' : vwapMatch ? `Price is on the ${direction.toLowerCase()} side of VWAP.` : 'Price is on the opposing side of VWAP.' },
+            { label: 'S/R confirmation', points: signalMatch ? 20 : levelNear ? 10 : 0, maxPoints: 20, reason: signalMatch ? `Confirmed ${direction.toLowerCase()} candle near support/resistance with an FVG or order-block retest.` : levelNear ? 'Near a level without full confirmation.' : 'No nearby confirming level.' },
+            { label: 'RSI', points: rsiMatch ? 15 : 0, maxPoints: 15, reason: rsiMatch ? `RSI ${lastRsi.toFixed(1)} supports ${direction.toLowerCase()} conditions.` : `RSI ${lastRsi.toFixed(1)} is outside the directional range.` },
+            {
+              label: 'FVG / order-block retest',
+              points: priceActionPoints,
+              maxPoints: 25,
+              reason: priceActionPoints
+                ? `${fvgRetest ? 'FVG' : ''}${fvgRetest && orderBlockRetest ? ' and ' : ''}${orderBlockRetest ? 'order block' : ''} retest confirmed.`
+                : 'No confirmed retest of an active FVG or order block.',
+            },
           ];
         };
         const longScoreDetails = directionPoints('Long');
         const shortScoreDetails = directionPoints('Short');
         const longScore = longScoreDetails.reduce((sum, item) => sum + item.points, 0);
         const shortScore = shortScoreDetails.reduce((sum, item) => sum + item.points, 0);
-        const signal = bullishSignal ? 'Bullish near support' : bearishSignal ? 'Bearish near resistance' : 'No clear S/R signal';
+        const signal = bullishSignal ? 'Bullish FVG/OB retest near support'
+          : bearishSignal ? 'Bearish FVG/OB retest near resistance'
+            : 'No clear S/R and FVG/OB signal';
         const entryIdea = bullishSignal
-          ? `Closed candle confirmed near support at ${nearestSupport.price}.`
+          ? `Closed candle confirmed near support at ${nearestSupport.price} with an FVG or order-block retest.`
           : bearishSignal
-            ? `Closed candle confirmed near resistance at ${nearestResistance.price}.`
+            ? `Closed candle confirmed near resistance at ${nearestResistance.price} with an FVG or order-block retest.`
             : nearSupport
-              ? `Price is near support at ${nearestSupport.price}, without a closed-candle confirmation.`
+              ? `Price is near support at ${nearestSupport.price}; wait for a closed-candle FVG or order-block retest.`
               : nearResistance
-                ? `Price is near resistance at ${nearestResistance.price}, without a closed-candle confirmation.`
-                : 'Wait for a closed candle near a relevant level with trend confirmation.';
-        const signalKey = `${yahooSymbol}|${timeframe}|${signalCandles.at(-1)?.time ?? 'none'}`;
+                ? `Price is near resistance at ${nearestResistance.price}; wait for a closed-candle FVG or order-block retest.`
+                : 'Wait for support/resistance, trend, and a closed-candle FVG or order-block retest to align.';
+        const signalKey = `price-action-v1|${yahooSymbol}|${timeframe}|${signalCandles.at(-1)?.time ?? 'none'}`;
         let signalMarkers;
         let backtest;
         if (signalCacheRef.current?.key === signalKey) {
@@ -925,14 +966,17 @@ function App() {
             const ema21AtTime = ema21ByTime.get(candle.time);
             const support = historyLevels.supports[0];
             const resistance = historyLevels.resistances[0];
+            const historicalPriceAction = getPriceActionContext(signalCandles, index);
             const longSignal = support && candle.close > candle.open &&
               ema9AtTime >= ema21AtTime &&
-              candle.close - support.price <= Math.max(historyAtr * 0.5, candle.close * 0.002);
+              candle.close - support.price <= Math.max(historyAtr * 0.5, candle.close * 0.002) &&
+              historicalPriceAction.longRetest;
             const shortSignal = resistance && candle.close < candle.open &&
               ema9AtTime <= ema21AtTime &&
-              resistance.price - candle.close <= Math.max(historyAtr * 0.5, candle.close * 0.002);
-            if (longSignal) markersForCandles.push({ time: candle.time, position: 'belowBar', shape: 'arrowUp', text: '▲ Long' });
-            if (shortSignal) markersForCandles.push({ time: candle.time, position: 'aboveBar', shape: 'arrowDown', text: '▼ Short' });
+              resistance.price - candle.close <= Math.max(historyAtr * 0.5, candle.close * 0.002) &&
+              historicalPriceAction.shortRetest;
+            if (longSignal) markersForCandles.push({ time: candle.time, position: 'belowBar', shape: 'arrowUp', text: '▲ FVG/OB Long' });
+            if (shortSignal) markersForCandles.push({ time: candle.time, position: 'aboveBar', shape: 'arrowDown', text: '▼ FVG/OB Short' });
           });
           signalMarkers = markersForCandles;
           backtest = backtestSignals(signalCandles, { interval: timeframe, timeZone });
@@ -950,7 +994,7 @@ function App() {
         }));
         const chartData = {
           candles, ema9, ema21, vwap, volume, rsi: rsiValues, levels, dailyLevels,
-          signalMarkers, markers, timeZone,
+          priceActionZones, signalMarkers, markers, timeZone,
           symbol: yahooSymbol, interval: timeframe,
         };
         latestChartDataRef.current = chartData;
@@ -976,7 +1020,7 @@ function App() {
           }
         }
         const activeScore = longScore >= shortScore ? longScore : shortScore;
-        const activeDirection = Math.max(longScore, shortScore) < 40
+        const activeDirection = Math.max(longScore, shortScore) < 40 || !(bullishSignal || bearishSignal)
           ? 'No clear setup'
           : longScore >= shortScore ? 'Long' : 'Short';
         setAnalysis({
@@ -991,6 +1035,7 @@ function App() {
           supports: levels.supports,
           resistances: levels.resistances,
           dailyLevels,
+          priceAction,
           ema9: lastEma9.toFixed(2),
           ema21: lastEma21.toFixed(2),
           vwap: lastVwap?.toFixed(2) || null,
@@ -1346,8 +1391,8 @@ function App() {
           onKeyDown={(e) => {
             if (e.key === 'Enter') searchStocks();
           }}
-          placeholder={market === 'India' ? 'Company or ticker (e.g. TCS)' : 'Company or ticker (e.g. AAPL)'}
-          aria-label="Search stocks"
+          placeholder={market === 'India' ? 'Company, ticker, or index (e.g. TCS, NIFTY)' : 'Company or ticker (e.g. AAPL)'}
+          aria-label={market === 'India' ? 'Search stocks and indices' : 'Search stocks'}
           className="stock-search-input"
         />
 
@@ -1483,14 +1528,18 @@ function App() {
               <button
                 type="button"
                 className="add-scan-stock"
-                onClick={() => addToIntradayList(stock)}
-                disabled={(customScannerStocks[market] || []).some(
-                  (item) => getYahooSymbol(item, market) === getYahooSymbol(stock, market),
-                )}
+                onClick={() => stock.instrumentType === 'INDEX' ? addToWatchlist(stock) : addToIntradayList(stock)}
+                disabled={stock.instrumentType === 'INDEX'
+                  ? (watchlists[market] || []).some((item) => getYahooSymbol(item, market) === getYahooSymbol(stock, market))
+                  : (customScannerStocks[market] || []).some((item) => getYahooSymbol(item, market) === getYahooSymbol(stock, market))}
               >
-                {(customScannerStocks[market] || []).some(
-                  (item) => getYahooSymbol(item, market) === getYahooSymbol(stock, market),
-                ) ? 'Added' : '+ Intraday list'}
+                {stock.instrumentType === 'INDEX'
+                  ? (watchlists[market] || []).some((item) => getYahooSymbol(item, market) === getYahooSymbol(stock, market))
+                    ? 'Added'
+                    : '+ Watchlist'
+                  : (customScannerStocks[market] || []).some((item) => getYahooSymbol(item, market) === getYahooSymbol(stock, market))
+                    ? 'Added'
+                    : '+ Intraday list'}
               </button>
             </div>
           ))}
@@ -1638,7 +1687,7 @@ function App() {
             </div>
           </div>
           <div className="index-option-grid">
-            {INDEX_OPTIONS.map((index) => (
+            {INDIAN_INDICES.map((index) => (
               <button
                 type="button"
                 key={index.id}
@@ -1652,7 +1701,7 @@ function App() {
             ))}
           </div>
           {(() => {
-            const selectedIndex = INDEX_OPTIONS.find((index) => index.id === selectedOptionsIndex);
+            const selectedIndex = INDIAN_INDICES.find((index) => index.id === selectedOptionsIndex);
             return (
               <div className="option-chain-info">
                 <h3>{selectedIndex.name} option chain</h3>
@@ -1802,6 +1851,28 @@ function App() {
           </section>
 
           <section className="analysis-panel">
+            <h2>FVG &amp; order-block zones</h2>
+            <p className="subtle-note">
+              Heuristic zones: FVGs mark three-candle price gaps; order blocks mark the last opposing candle before a strong close beyond a recent swing. A setup needs a confirmed zone retest plus the existing trend and support/resistance checks.
+            </p>
+            <div className="levels-columns">
+              {[
+                ['Bullish FVG', analysis.priceAction.bullishFvg, analysis.priceAction.longFvgRetest],
+                ['Bearish FVG', analysis.priceAction.bearishFvg, analysis.priceAction.shortFvgRetest],
+                ['Bullish order block', analysis.priceAction.bullishOrderBlock, analysis.priceAction.longOrderBlockRetest],
+                ['Bearish order block', analysis.priceAction.bearishOrderBlock, analysis.priceAction.shortOrderBlockRetest],
+              ].map(([label, zone, retested]) => (
+                <div className="level-row" key={label}>
+                  <span>{label}</span>
+                  {zone
+                    ? <><strong>{currencySymbol}{zone.lower.toFixed(2)}–{currencySymbol}{zone.upper.toFixed(2)}</strong><small>{retested ? 'Confirmed retest' : 'Active zone'}</small></>
+                    : <small>No active zone</small>}
+                </div>
+              ))}
+            </div>
+          </section>
+
+          <section className="analysis-panel">
             <h2>Support &amp; resistance</h2>
             <div className="levels-columns">
               <div>
@@ -1905,7 +1976,7 @@ function App() {
           </details>
           <section className="analysis-panel backtest-panel">
             <h2>Historical signal simulation</h2>
-            <p className="subtle-note">Statistics are calculated only from the loaded historical candles using the current signal rules. They describe this sample and do not predict future results.</p>
+            <p className="subtle-note">This simulation requires a confirmed FVG or order-block retest together with the existing EMA, candle, and nearby support/resistance checks. It uses only loaded historical candles, is a simplified heuristic, and does not predict future results.</p>
             {backtestResult && (
               <>
                 <div className="metrics-grid">
@@ -1962,6 +2033,8 @@ function App() {
         {analysis?.vwap && <span><i className="legend-vwap" /> Session VWAP</span>}
         <span><i className="legend-support" /> Support</span>
         <span><i className="legend-resistance" /> Resistance</span>
+        <span><i className="legend-fvg" /> FVG zone bounds</span>
+        <span><i className="legend-order-block" /> Order-block zone bounds</span>
       </div>
 
       {/* Chart */}

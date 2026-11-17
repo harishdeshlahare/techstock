@@ -22,13 +22,15 @@ The app opens with a demo login screen. Demo credentials are `hd` / `hd`. This c
 
 The chart includes EMA 9/21, intraday session VWAP, pivot-based support/resistance levels, exchange-timezone labels, closed-candle signals, and higher-timeframe context. Directional component scores are heuristics, not win probabilities. The illustrative calculator uses structural stop/target levels with an ATR fallback, and supports capital- or risk-based share sizing plus user-entered brokerage and slippage assumptions; it does not estimate taxes.
 
+The chart also marks active fair-value-gap (three-candle gap) and heuristic order-block zones. A historical signal requires a confirmed retest of either zone, a matching candle/EMA direction, and nearby pivot support/resistance. The simulator uses the same rules without future candles, but these subjective price-action concepts are not validated guarantees or investment advice.
+
 Save a calculator scenario to the Stock history tab to keep its entry zone, stop, two targets, direction, and timeframe in this browser. Trades remain pending until a later candle touches the entry zone, then track T1, T2, and the stop on subsequent chart loads. Older scenarios outside the available candle range are marked unchecked/expired. If one candle touches the stop and a target, the order is unknown. A candle-level hit time is not an exact intrabar execution time. The chart also shows an explicitly limited backtest on the currently loaded data.
 
 The per-stock Trade report summarizes saved outcomes, P&L, R multiples, holding time, and drawdown, with CSV and print exports. Open, pending, expired, and ambiguous scenarios are kept separate from closed-trade performance statistics; historical results are not predictions.
 
 The Intraday ideas tab scans a curated liquid-stock universe with Yahoo daily candles for average share volume, relative volume from completed candles, ATR%, directional RSI/trend, and proximity to support/resistance. The scan is a shortlist only: volume is not time-of-day adjusted, so confirm candidates on the intraday chart before acting. Exchange open/closed status uses local session hours and weekdays; it does not include exchange holidays.
 
-Add a searched result to the Intraday ideas list with the `+ Intraday list` action; custom symbols persist in this browser and can be removed from the scanner tab. The Index options tab links to the official NSE chains for NIFTY 50/NIFTY BANK and BSE chain for SENSEX. Exchange pages are opened externally; this app does not claim to provide a live options feed.
+Search for `NIFTY`, `Bank Nifty`, or `Sensex` in the India market to open their Yahoo Finance index charts and add them to your watchlist. Add searched stocks to the Intraday ideas list with the `+ Intraday list` action; custom symbols persist in this browser and can be removed from the scanner tab. The Index options tab links to the official NSE chains for NIFTY 50/NIFTY BANK and BSE chain for SENSEX. Exchange pages are opened externally; this app does not claim to provide a live options feed.
 
 ## Development
 

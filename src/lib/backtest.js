@@ -1,5 +1,6 @@
 import { calculateATR, calculateEMA } from './indicators.js';
 import { buildTradeLevels, findSupportResistance } from './levels.js';
+import { getPriceActionContext } from './priceAction.js';
 
 function summarize(trades) {
   const pnl = trades.map((trade) => trade.pnl);
@@ -43,11 +44,12 @@ function simulate(candles, startIndex, endIndex, indicators, interval, timeZone)
     if (![atr, fast, slow].every(Number.isFinite) || atr <= 0) continue;
     const support = levels.supports[0];
     const resistance = levels.resistances[0];
+    const priceAction = getPriceActionContext(candles, index);
     const tolerance = Math.max(atr * 0.5, candle.close * 0.002);
     const longSignal = support && candle.close > candle.open &&
-      fast >= slow && candle.close - support.price <= tolerance;
+      fast >= slow && candle.close - support.price <= tolerance && priceAction.longRetest;
     const shortSignal = resistance && candle.close < candle.open &&
-      fast <= slow && resistance.price - candle.close <= tolerance;
+      fast <= slow && resistance.price - candle.close <= tolerance && priceAction.shortRetest;
     if (!longSignal && !shortSignal) continue;
 
     const direction = longSignal ? 'Long' : 'Short';
