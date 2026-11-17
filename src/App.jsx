@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { createChart, createSeriesMarkers, CandlestickSeries, LineSeries, HistogramSeries } from 'lightweight-charts';
 import { calculateATR, calculateEMA, calculateRSI, calculateVWAP, getTrend } from './lib/indicators.js';
 import { buildTradeLevels, findSupportResistance } from './lib/levels.js';
@@ -6,6 +6,7 @@ import { backtestSignals } from './lib/backtest.js';
 import { updateTradeHistory } from './lib/tradeHistory.js';
 import { getMarketStatus } from './lib/marketStatus.js';
 import { getPriceActionContext } from './lib/priceAction.js';
+import { evaluateEntrySignals, getSignalLevelLookback } from './lib/signalRules.js';
 import { DEFAULT_YAHOO_API_BASE_URL, fetchYahooJson, getClosedCandles, getYahooSymbol, normalizeYahooProxyUrl, parseYahooCandles } from './lib/yahoo.js';
 import { INDIAN_INDICES, searchIndianIndices } from './lib/indices.js';
 import { TRADING_THRESHOLDS } from './lib/config/costs.js';
@@ -223,8 +224,15 @@ function App() {
   const [sizingMode, setSizingMode] = useState('capital');
   const [brokeragePerOrder, setBrokeragePerOrder] = useState('0');
   const [slippagePercent, setSlippagePercent] = useState('0');
+  const brokeragePerOrderRef = useRef(brokeragePerOrder);
+  const slippagePercentRef = useRef(slippagePercent);
   const [moveStopToBreakeven, setMoveStopToBreakeven] = useState(false);
   const [tradeDirection, setTradeDirection] = useState('Long');
+  const [selectedStrategy, setSelectedStrategy] = useState(() => (
+    loadPreference('techstock-signal-strategy', 'support-resistance') === 'price-action'
+      ? 'price-action'
+      : 'support-resistance'
+  ));
   const [activeTab, setActiveTab] = useState(() => {
     const saved = loadPreference('techstock-workspace-tab', 'home');
     return ['home', 'chart', 'ideas', 'report', 'history', 'paper', 'options'].includes(saved) ? saved : 'home';
@@ -263,19 +271,6 @@ function App() {
   const watchlistQuoteCacheRef = useRef(new Map());
   const { startScan, cancelScan } = useScanner(market, activeTab);
   const symbolMarketKey = `${getYahooSymbol(selectedStock, market)}|${market}`;
-  const activeSetupDirection = analysis?.setupDirection || tradeDirection;
-  const verdictTradeLevels = useMemo(() => (
-    analysis
-      ? buildTradeLevels({
-        direction: activeSetupDirection,
-        entry: Number(analysis.price),
-        atr: Number(analysis.atr || 0),
-        supports: analysis.supports,
-        resistances: analysis.resistances,
-      })
-      : null
-  ), [analysis, activeSetupDirection]);
-
   // Toggles
   const [showVolume, setShowVolume] = useState(true);
   const [showSR, setShowSR] = useState(true);
@@ -283,6 +278,11 @@ function App() {
   useEffect(() => {
     latestTradeHistoryRef.current = tradeHistory;
   }, [tradeHistory]);
+
+  useEffect(() => {
+    brokeragePerOrderRef.current = brokeragePerOrder;
+    slippagePercentRef.current = slippagePercent;
+  }, [brokeragePerOrder, slippagePercent]);
 
   useEffect(() => {
     if (!autoRefresh || activeTab !== 'chart') return undefined;
@@ -333,6 +333,14 @@ function App() {
       console.error('Unable to save theme preference.', error);
     }
   }, [theme]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('techstock-signal-strategy', selectedStrategy);
+    } catch (error) {
+      console.error('Unable to save signal strategy preference.', error);
+    }
+  }, [selectedStrategy]);
 
   function handleLogin(event) {
     event.preventDefault();
@@ -869,10 +877,8 @@ function App() {
         const ema21 = calculateEMA(signalCandles, 21);
         const rsiValues = calculateRSI(signalCandles, 14);
         const atrValues = calculateATR(signalCandles, 14, { interval: timeframe, timeZone });
-        const levels = findSupportResistance(signalCandles, ({
-          '1min': 120, '2min': 120, '5min': 120, '15min': 100, '30min': 100,
-          '1h': 80, '90min': 80, '1day': 120, '1week': 100, '1month': 80,
-        })[timeframe], { interval: timeframe, timeZone });
+        const levelLookback = getSignalLevelLookback(timeframe);
+        const levels = findSupportResistance(signalCandles, levelLookback, { interval: timeframe, timeZone });
         const isIntraday = !['1day', '1week', '1month'].includes(timeframe);
         const vwap = isIntraday ? calculateVWAP(candles, timeZone) : [];
         const lastCandle = signalCandles.at(-1);
@@ -891,16 +897,19 @@ function App() {
           priceAction.bullishOrderBlock,
           priceAction.bearishOrderBlock,
         ].filter(Boolean);
-        const nearestSupport = levels.supports.find((level) => level.price < lastClose);
-        const nearestResistance = levels.resistances.find((level) => level.price > lastClose);
-        const nearSupport = nearestSupport && lastClose - nearestSupport.price <= Math.max(lastAtr * 0.5, lastClose * 0.002);
-        const nearResistance = nearestResistance && nearestResistance.price - lastClose <= Math.max(lastAtr * 0.5, lastClose * 0.002);
-        const bullishSignal = Boolean(
-          nearSupport && lastCandle.close > lastCandle.open && lastEma9 >= lastEma21 && priceAction.longRetest,
-        );
-        const bearishSignal = Boolean(
-          nearResistance && lastCandle.close < lastCandle.open && lastEma9 <= lastEma21 && priceAction.shortRetest,
-        );
+        const entrySignals = evaluateEntrySignals({
+          candles: signalCandles,
+          ema9: lastEma9,
+          ema21: lastEma21,
+          atr: lastAtr,
+          supports: levels.supports,
+          resistances: levels.resistances,
+          strategy: selectedStrategy,
+          priceAction,
+        });
+        const { support: nearestSupport, resistance: nearestResistance } = entrySignals;
+        const { nearSupport, nearResistance, longSignal: bullishSignal, shortSignal: bearishSignal } = entrySignals;
+        const usesPriceAction = selectedStrategy === 'price-action';
         const directionPoints = (direction) => {
           const isLong = direction === 'Long';
           const trendMatch = currentTrend === (isLong ? 'Bullish' : 'Bearish') && higherTrend === currentTrend;
@@ -914,6 +923,15 @@ function App() {
           const priceActionPoints = fvgRetest && orderBlockRetest ? 25
             : fvgRetest || orderBlockRetest ? 15
               : 0;
+          if (!usesPriceAction) {
+            return [
+              { label: 'Trend alignment', points: trendMatch ? 25 : 0, maxPoints: 25, reason: trendMatch ? `${currentTrend} chart and ${higherLabel} trends agree.` : 'Chart and higher-timeframe trends do not align.' },
+              { label: 'EMA alignment', points: emaMatch ? 15 : 0, maxPoints: 15, reason: emaMatch ? `EMA 9 is aligned for ${direction.toLowerCase()}.` : 'EMA 9/21 alignment does not support this direction.' },
+              { label: 'VWAP side', points: vwapMatch ? 15 : 0, maxPoints: 15, reason: lastVwap === null ? 'VWAP unavailable for this timeframe.' : vwapMatch ? `Price is on the ${direction.toLowerCase()} side of VWAP.` : 'Price is on the opposing side of VWAP.' },
+              { label: 'S/R confirmation', points: signalMatch ? 25 : levelNear ? 12 : 0, maxPoints: 25, reason: signalMatch ? `Confirmed ${direction.toLowerCase()} candle near structure.` : levelNear ? 'Near a level without full candle confirmation.' : 'No nearby confirming level.' },
+              { label: 'RSI', points: rsiMatch ? 20 : 0, maxPoints: 20, reason: rsiMatch ? `RSI ${lastRsi.toFixed(1)} supports ${direction.toLowerCase()} conditions.` : `RSI ${lastRsi.toFixed(1)} is outside the directional range.` },
+            ];
+          }
           return [
             { label: 'Trend alignment', points: trendMatch ? 20 : 0, maxPoints: 20, reason: trendMatch ? `${currentTrend} chart and ${higherLabel} trends agree.` : 'Chart and higher-timeframe trends do not align.' },
             { label: 'EMA alignment', points: emaMatch ? 10 : 0, maxPoints: 10, reason: emaMatch ? `EMA 9 is aligned for ${direction.toLowerCase()}.` : 'EMA 9/21 alignment does not support this direction.' },
@@ -934,19 +952,26 @@ function App() {
         const shortScoreDetails = directionPoints('Short');
         const longScore = longScoreDetails.reduce((sum, item) => sum + item.points, 0);
         const shortScore = shortScoreDetails.reduce((sum, item) => sum + item.points, 0);
-        const signal = bullishSignal ? 'Bullish FVG/OB retest near support'
-          : bearishSignal ? 'Bearish FVG/OB retest near resistance'
-            : 'No clear S/R and FVG/OB signal';
         const entryIdea = bullishSignal
-          ? `Closed candle confirmed near support at ${nearestSupport.price} with an FVG or order-block retest.`
+          ? usesPriceAction
+            ? `Closed candle confirmed near support at ${nearestSupport.price} with an FVG or order-block retest.`
+            : `Closed candle confirmed near support at ${nearestSupport.price}.`
           : bearishSignal
-            ? `Closed candle confirmed near resistance at ${nearestResistance.price} with an FVG or order-block retest.`
+            ? usesPriceAction
+              ? `Closed candle confirmed near resistance at ${nearestResistance.price} with an FVG or order-block retest.`
+              : `Closed candle confirmed near resistance at ${nearestResistance.price}.`
             : nearSupport
-              ? `Price is near support at ${nearestSupport.price}; wait for a closed-candle FVG or order-block retest.`
+              ? usesPriceAction
+                ? `Price is near support at ${nearestSupport.price}; wait for a closed-candle FVG or order-block retest.`
+                : `Price is near support at ${nearestSupport.price}, without a closed-candle confirmation.`
               : nearResistance
-                ? `Price is near resistance at ${nearestResistance.price}; wait for a closed-candle FVG or order-block retest.`
-                : 'Wait for support/resistance, trend, and a closed-candle FVG or order-block retest to align.';
-        const signalKey = `price-action-v1|${yahooSymbol}|${timeframe}|${signalCandles.at(-1)?.time ?? 'none'}`;
+                ? usesPriceAction
+                  ? `Price is near resistance at ${nearestResistance.price}; wait for a closed-candle FVG or order-block retest.`
+                  : `Price is near resistance at ${nearestResistance.price}, without a closed-candle confirmation.`
+                : usesPriceAction
+                  ? 'Wait for support/resistance, trend, and a closed-candle FVG or order-block retest to align.'
+                  : 'Wait for a closed candle near a relevant level with trend confirmation.';
+        const signalKey = `${selectedStrategy}|${yahooSymbol}|${timeframe}|${brokeragePerOrderRef.current}|${slippagePercentRef.current}|${signalCandles.at(-1)?.time ?? 'none'}`;
         let signalMarkers;
         let backtest;
         if (signalCacheRef.current?.key === signalKey) {
@@ -959,27 +984,40 @@ function App() {
           const ema21ByTime = new Map(ema21.map((point) => [point.time, point.value]));
           signalCandles.forEach((candle, index) => {
             if (index < 20) return;
-            const history = signalCandles.slice(Math.max(0, index - 119), index + 1);
-            const historyLevels = findSupportResistance(history, 120, { interval: timeframe, timeZone });
+            const history = signalCandles.slice(Math.max(0, index - levelLookback + 1), index + 1);
+            const historyLevels = findSupportResistance(history, levelLookback, { interval: timeframe, timeZone });
             const historyAtr = atrByTime.get(candle.time) || 0;
             const ema9AtTime = ema9ByTime.get(candle.time);
             const ema21AtTime = ema21ByTime.get(candle.time);
-            const support = historyLevels.supports[0];
-            const resistance = historyLevels.resistances[0];
-            const historicalPriceAction = getPriceActionContext(signalCandles, index);
-            const longSignal = support && candle.close > candle.open &&
-              ema9AtTime >= ema21AtTime &&
-              candle.close - support.price <= Math.max(historyAtr * 0.5, candle.close * 0.002) &&
-              historicalPriceAction.longRetest;
-            const shortSignal = resistance && candle.close < candle.open &&
-              ema9AtTime <= ema21AtTime &&
-              resistance.price - candle.close <= Math.max(historyAtr * 0.5, candle.close * 0.002) &&
-              historicalPriceAction.shortRetest;
-            if (longSignal) markersForCandles.push({ time: candle.time, position: 'belowBar', shape: 'arrowUp', text: '▲ FVG/OB Long' });
-            if (shortSignal) markersForCandles.push({ time: candle.time, position: 'aboveBar', shape: 'arrowDown', text: '▼ FVG/OB Short' });
+            const historicalSignals = evaluateEntrySignals({
+              candles: signalCandles,
+              index,
+              ema9: ema9AtTime,
+              ema21: ema21AtTime,
+              atr: historyAtr,
+              supports: historyLevels.supports,
+              resistances: historyLevels.resistances,
+              strategy: selectedStrategy,
+            });
+            const { longSignal, shortSignal } = historicalSignals;
+            if (longSignal) markersForCandles.push({
+              time: candle.time, position: 'belowBar', shape: 'arrowUp',
+              text: usesPriceAction ? '▲ FVG/OB Long' : '▲ Long',
+            });
+            if (shortSignal) markersForCandles.push({
+              time: candle.time, position: 'aboveBar', shape: 'arrowDown',
+              text: usesPriceAction ? '▼ FVG/OB Short' : '▼ Short',
+            });
           });
           signalMarkers = markersForCandles;
-          backtest = backtestSignals(signalCandles, { interval: timeframe, timeZone });
+          backtest = backtestSignals(signalCandles, {
+            interval: timeframe,
+            timeZone,
+            strategy: selectedStrategy,
+            levelLookback,
+            brokeragePerOrder: Number(brokeragePerOrderRef.current) || 0,
+            slippagePercent: Number(slippagePercentRef.current) || 0,
+          });
           signalCacheRef.current = { key: signalKey, markers: signalMarkers, backtest };
         }
         const visibleTrades = latestTradeHistoryRef.current.filter(
@@ -995,7 +1033,8 @@ function App() {
         const chartData = {
           candles, ema9, ema21, vwap, volume, rsi: rsiValues, levels, dailyLevels,
           priceActionZones, signalMarkers, markers, timeZone,
-          symbol: yahooSymbol, interval: timeframe,
+          signalCandles, symbol: yahooSymbol, interval: timeframe,
+          strategy: selectedStrategy, levelLookback,
         };
         latestChartDataRef.current = chartData;
         setTradeHistory((current) => updateTradeHistory(
@@ -1019,10 +1058,10 @@ function App() {
             fitContentKeyRef.current = initialChartKey;
           }
         }
-        const activeScore = longScore >= shortScore ? longScore : shortScore;
-        const activeDirection = Math.max(longScore, shortScore) < 40 || !(bullishSignal || bearishSignal)
-          ? 'No clear setup'
-          : longScore >= shortScore ? 'Long' : 'Short';
+        const activeDirection = bullishSignal ? 'Long' : bearishSignal ? 'Short' : null;
+        const checklistDirection = activeDirection || (longScore >= shortScore ? 'Long' : 'Short');
+        const activeScore = checklistDirection === 'Long' ? longScore : shortScore;
+        const entryChecklist = checklistDirection === 'Long' ? entrySignals.longConditions : entrySignals.shortConditions;
         setAnalysis({
           price: lastClose.toFixed(2),
           currency: selectedStock.currency || (market === 'India' ? 'INR' : 'USD'),
@@ -1039,9 +1078,12 @@ function App() {
           ema9: lastEma9.toFixed(2),
           ema21: lastEma21.toFixed(2),
           vwap: lastVwap?.toFixed(2) || null,
-          signal,
           setupScore: activeScore,
-          setupDirection: activeDirection === 'No clear setup' ? null : activeDirection,
+          setupDirection: activeDirection,
+          checklistDirection,
+          entryChecklist,
+          strategyName: usesPriceAction ? 'FVG & order-block confluence' : 'Support & resistance',
+          timeframe,
           longScore,
           shortScore,
           longScoreDetails,
@@ -1070,7 +1112,25 @@ function App() {
         setLoading(false);
       }
     };
-  }, [isAuthenticated, activeTab, selectedStock, market, timeframe, yahooApiBaseUrl, refreshKey, setTradeHistory]);
+  }, [isAuthenticated, activeTab, selectedStock, market, timeframe, yahooApiBaseUrl, refreshKey, selectedStrategy, setTradeHistory]);
+
+  useEffect(() => {
+    const data = latestChartDataRef.current;
+    if (
+      !data?.signalCandles
+      || data.symbol !== getYahooSymbol(selectedStock, market)
+      || data.interval !== timeframe
+      || data.strategy !== selectedStrategy
+    ) return;
+    setBacktestResult(backtestSignals(data.signalCandles, {
+      interval: data.interval,
+      timeZone: data.timeZone,
+      strategy: data.strategy,
+      levelLookback: data.levelLookback,
+      brokeragePerOrder: Number(brokeragePerOrder) || 0,
+      slippagePercent: Number(slippagePercent) || 0,
+    }));
+  }, [brokeragePerOrder, slippagePercent, selectedStock, market, timeframe, selectedStrategy]);
 
   useEffect(() => {
     const chartData = latestChartDataRef.current;
@@ -1224,6 +1284,11 @@ function App() {
   const potentialLoss = rawPotentialLoss + tradingCosts;
   const potentialTarget1Gain = shareCount * Math.abs(tradeLevels.target1 - entryPrice) - tradingCosts;
   const potentialTarget2Gain = shareCount * Math.abs(tradeLevels.target2 - entryPrice) - tradingCosts;
+  const stopRiskPercent = entryPrice > 0 ? riskPerShare / entryPrice * 100 : 0;
+  const target1Percent = entryPrice > 0 ? Math.abs(tradeLevels.target1 - entryPrice) / entryPrice * 100 : 0;
+  const target2Percent = entryPrice > 0 ? Math.abs(tradeLevels.target2 - entryPrice) / entryPrice * 100 : 0;
+  const target1RiskReward = riskPerShare > 0 ? Math.abs(tradeLevels.target1 - entryPrice) / riskPerShare : 0;
+  const target2RiskReward = riskPerShare > 0 ? Math.abs(tradeLevels.target2 - entryPrice) / riskPerShare : 0;
   const stopPrice = tradeLevels.stop;
   const targetPrice = tradeLevels.target2;
   const entryZoneWidth = Number(analysis?.atr || 0) * 0.25;
@@ -1719,6 +1784,31 @@ function App() {
       {activeTab === 'chart' && (
         <>
       <div id="panel-chart" role="tabpanel" aria-labelledby="tab-chart">
+      <fieldset className="strategy-selector">
+        <legend>Signal strategy</legend>
+        <label>
+          <input
+            type="radio"
+            name="signal-strategy"
+            value="support-resistance"
+            checked={selectedStrategy === 'support-resistance'}
+            onChange={() => setSelectedStrategy('support-resistance')}
+          />
+          Support &amp; resistance (original)
+          <small>Closed candle near a pivot level with EMA alignment.</small>
+        </label>
+        <label>
+          <input
+            type="radio"
+            name="signal-strategy"
+            value="price-action"
+            checked={selectedStrategy === 'price-action'}
+            onChange={() => setSelectedStrategy('price-action')}
+          />
+          FVG &amp; order-block confluence
+          <small>Original checks plus a confirmed FVG/OB retest.</small>
+        </label>
+      </fieldset>
       <section className="watchlist-panel" aria-label={`${market} watchlist`}>
         <div className="watchlist-heading">
           <strong>{market} watchlist</strong>
@@ -1797,19 +1887,27 @@ function App() {
       {analysis && (
         <div className="analysis-layout">
           <section className="analysis-panel verdict-card">
-            <h2>Verdict</h2>
+            <h2>Entry check · {analysis.timeframe}</h2>
             <div className="verdict-grid">
-              <strong className={analysis.setupDirection === 'Long' ? 'tone-bullish' : analysis.setupDirection === 'Short' ? 'tone-bearish' : ''}>
-                {analysis.setupDirection ? `${analysis.setupDirection} setup ${analysis.setupScore}/100` : 'No clear setup'}
+              <strong className={`entry-status ${analysis.setupDirection === 'Long' ? 'tone-bullish' : analysis.setupDirection === 'Short' ? 'tone-bearish' : ''}`}>
+                {analysis.setupDirection
+                  ? `${analysis.setupDirection} conditions met`
+                  : `Wait · ${analysis.checklistDirection} conditions incomplete`}
               </strong>
-              {analysis.setupDirection && (
-                <>
-                  <span>Nearest S/R: {currencySymbol}{(analysis.setupDirection === 'Long' ? analysis.supports[0]?.price : analysis.resistances[0]?.price)?.toFixed(2) ?? '—'}</span>
-                  <span>Entry {currencySymbol}{entryPrice.toFixed(2)} · Stop {currencySymbol}{verdictTradeLevels.stop.toFixed(2)}</span>
-                  <span>T1 {currencySymbol}{verdictTradeLevels.target1.toFixed(2)} · T2 {currencySymbol}{verdictTradeLevels.target2.toFixed(2)}</span>
-                </>
-              )}
-              <p>{analysis.entryIdea}</p>
+              <span className="entry-strategy-name">{analysis.strategyName}</span>
+              <ul className="entry-checklist">
+                {analysis.entryChecklist.map((condition) => (
+                  <li className={condition.passed ? 'is-passed' : 'is-pending'} key={condition.label}>
+                    <span>{condition.passed ? 'Passed' : 'Waiting'}</span>
+                    {condition.label}
+                  </li>
+                ))}
+              </ul>
+              <span className="entry-reference">
+                Plan reference: {currencySymbol}{entryPrice.toFixed(2)} · stop {currencySymbol}{stopPrice.toFixed(2)} · target 1 {currencySymbol}{target1Price.toFixed(2)} · target 2 {currencySymbol}{targetPrice.toFixed(2)}
+              </span>
+              <p className="subtle-note">{analysis.entryIdea}</p>
+              <p className="subtle-note">The checklist confirms a chart setup only; it is not a guaranteed entry or a probability of profit.</p>
             </div>
           </section>
           <section className="analysis-panel">
@@ -1823,26 +1921,30 @@ function App() {
               <div className="metric"><span>EMA 21</span><strong>{currencySymbol}{analysis.ema21}</strong></div>
               <div className="metric"><span>Session VWAP</span><strong>{analysis.vwap ? `${currencySymbol}${analysis.vwap}` : 'Intraday only'}</strong></div>
               <div className="metric">
-                <span>Directional alignment score</span>
-                <strong>{analysis.setupDirection ? `${analysis.setupDirection} setup ${analysis.setupScore}/100` : 'No clear setup'}</strong>
-                <small>Heuristic component score, not a win probability.</small>
+                <span>Confluence score · heuristic</span>
+                <strong>Long {analysis.longScore}/100 · Short {analysis.shortScore}/100</strong>
+                <small>Context score only; the entry checklist above decides whether conditions are met.</small>
               </div>
             </div>
-            <div className="score-breakdown">
-              {[['Long', analysis.longScore, analysis.longScoreDetails], ['Short', analysis.shortScore, analysis.shortScoreDetails]].map(([direction, score, details]) => (
-                <div className="quality-reasons" key={direction}>
-                  <strong>{direction} setup {score}/100</strong>
-                  <ul>
-                    {details.map((detail) => (
-                      <li key={detail.label}>
-                        <span>{detail.label}: {detail.reason}</span>
-                        <small>{detail.points}/{detail.maxPoints}</small>
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              ))}
-            </div>
+            <details className="score-breakdown-details">
+              <summary>Show score details</summary>
+              <p className="subtle-note">The score is a heuristic summary of context, not a win probability.</p>
+              <div className="score-breakdown">
+                {[['Long', analysis.longScore, analysis.longScoreDetails], ['Short', analysis.shortScore, analysis.shortScoreDetails]].map(([direction, score, details]) => (
+                  <div className="quality-reasons" key={direction}>
+                    <strong>{direction} context {score}/100</strong>
+                    <ul>
+                      {details.map((detail) => (
+                        <li key={detail.label}>
+                          <span>{detail.label}: {detail.reason}</span>
+                          <small>{detail.points}/{detail.maxPoints}</small>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                ))}
+              </div>
+            </details>
             {analysis.dailyUnavailable && (
               <p className="subtle-note">
                 Higher-timeframe context unavailable{analysis.dailyBiasError ? `: ${analysis.dailyBiasError}` : ' because Yahoo returned too few candles'}.
@@ -1853,7 +1955,7 @@ function App() {
           <section className="analysis-panel">
             <h2>FVG &amp; order-block zones</h2>
             <p className="subtle-note">
-              Heuristic zones: FVGs mark three-candle price gaps; order blocks mark the last opposing candle before a strong close beyond a recent swing. A setup needs a confirmed zone retest plus the existing trend and support/resistance checks.
+              Heuristic zones: FVGs mark three-candle price gaps; order blocks mark the last opposing candle before a strong close beyond a recent swing. Confluence mode requires a confirmed zone retest, matching candle/EMA direction, and nearby pivot support or resistance.
             </p>
             <div className="levels-columns">
               {[
@@ -1895,12 +1997,9 @@ function App() {
           </section>
 
           <section className="analysis-panel signal-panel">
-            <h2>Signal &amp; entry explanation</h2>
-            <strong className={analysis.signal.startsWith('Bullish') ? 'tone-bullish' : analysis.signal.startsWith('Bearish') ? 'tone-bearish' : ''}>
-              {analysis.signal}
-            </strong>
-            <p>{analysis.entryIdea}</p>
-            <p className="subtle-note">Signals are technical observations for education, not personalized investment advice.</p>
+            <h2>Using the checklist</h2>
+            <p>The checklist evaluates the latest completed candle. If it says “Wait,” the pending rows show which rule has not passed yet.</p>
+            <p>The reference price and calculator levels are scenario estimates, not an order or a promise of future price movement. Confirm the live quote and your risk limits before making a decision.</p>
           </section>
 
           <details className="analysis-panel calculator-panel calculator-details" open>
@@ -1943,21 +2042,21 @@ function App() {
             <div className="pnl-grid">
               <div className="metric"><span>Whole shares</span><strong>{shareCount}</strong></div>
               <div className="metric"><span>Entry zone · ±0.25 ATR</span><strong>{currencySymbol}{entryZoneLow.toFixed(2)}–{currencySymbol}{entryZoneHigh.toFixed(2)}</strong></div>
-              <div className="metric"><span>Reference entry</span><strong>{currencySymbol}{entryPrice.toFixed(2)}</strong></div>
-              <div className="metric"><span>Stop loss</span><strong>{currencySymbol}{stopPrice.toFixed(2)}</strong></div>
-              <div className="metric"><span>Target 1</span><strong>{currencySymbol}{target1Price.toFixed(2)}</strong></div>
-              <div className="metric"><span>Target 2</span><strong>{currencySymbol}{targetPrice.toFixed(2)}</strong></div>
+              <div className="metric"><span>Reference price · not an order</span><strong>{currencySymbol}{entryPrice.toFixed(2)}</strong></div>
+              <div className="metric"><span>Stop plan · {stopRiskPercent.toFixed(2)}% risk/share</span><strong>{currencySymbol}{stopPrice.toFixed(2)}</strong></div>
+              <div className="metric"><span>Target 1 · {target1Percent.toFixed(2)}% · {target1RiskReward.toFixed(2)}R</span><strong>{currencySymbol}{target1Price.toFixed(2)}</strong></div>
+              <div className="metric"><span>Target 2 · {target2Percent.toFixed(2)}% · {target2RiskReward.toFixed(2)}R</span><strong>{currencySymbol}{targetPrice.toFixed(2)}</strong></div>
               <div className="metric"><span>Net possible loss at stop</span><strong className="tone-bearish">−{currencySymbol}{potentialLoss.toFixed(2)}</strong></div>
               <div className="metric"><span>Net possible gain at target 1</span><strong className={potentialTarget1Gain >= 0 ? 'tone-bullish' : 'tone-bearish'}>{potentialTarget1Gain >= 0 ? '+' : '−'}{currencySymbol}{Math.abs(potentialTarget1Gain).toFixed(2)}</strong></div>
               <div className="metric"><span>Net possible gain at target 2</span><strong className={potentialTarget2Gain >= 0 ? 'tone-bullish' : 'tone-bearish'}>{potentialTarget2Gain >= 0 ? '+' : '−'}{currencySymbol}{Math.abs(potentialTarget2Gain).toFixed(2)}</strong></div>
             </div>
             <div className="trade-plan-reasons">
-              <strong>How these levels are set</strong>
+              <strong>How to read this plan</strong>
               <ul>
-                <li>Entry zone is centered on the latest chart price, with a buffer of 0.25 ATR; the reference entry is the current price.</li>
-                <li>Stop method: {tradeLevels.method}; stop distance is bounded between 0.75 and 2.5 ATR when structure is available, otherwise 1.5 ATR.</li>
-                <li>Targets use opposing structure when available, with a minimum 1R for T1 and at least 2R for T2.</li>
-                <li>{analysis.entryIdea}</li>
+                <li>Reference price is the latest completed candle close, not an instruction to place an order.</li>
+                <li>Stop uses {tradeLevels.method.toLowerCase()}; targets use nearby structure when available and otherwise use risk multiples.</li>
+                <li>Percentages and R multiples are price distances before brokerage, slippage, taxes, and gaps.</li>
+                <li>Current chart timeframe: {analysis.timeframe}. The market may change before an order is placed.</li>
               </ul>
             </div>
             <label className="control-toggle breakeven-toggle">
@@ -1976,13 +2075,19 @@ function App() {
           </details>
           <section className="analysis-panel backtest-panel">
             <h2>Historical signal simulation</h2>
-            <p className="subtle-note">This simulation requires a confirmed FVG or order-block retest together with the existing EMA, candle, and nearby support/resistance checks. It uses only loaded historical candles, is a simplified heuristic, and does not predict future results.</p>
+            <p className="subtle-note">
+              {selectedStrategy === 'price-action'
+                ? 'This simulation requires a confirmed FVG or order-block retest together with the existing EMA, candle, and nearby support/resistance checks.'
+                : 'This simulation uses the original EMA, candle, and nearby support/resistance rules.'}
+              {' '}It uses only loaded historical candles, is a simplified heuristic, and does not predict future results.
+            </p>
             {backtestResult && (
               <>
                 <div className="metrics-grid">
                   <div className="metric"><span>Trades</span><strong>{backtestResult.numberOfTrades}</strong></div>
                   <div className="metric"><span>Gross P&amp;L</span><strong>{backtestResult.gross?.totalPnl?.toFixed(2) ?? '0.00'}</strong></div>
                   <div className="metric"><span>Net P&amp;L</span><strong>{backtestResult.net?.totalPnl?.toFixed(2) ?? '0.00'}</strong></div>
+                  <div className="metric"><span>Trading costs</span><strong>{backtestResult.totalCosts?.toFixed(2) ?? '0.00'}</strong></div>
                   <div className="metric"><span>Win rate</span><strong>{backtestResult.winRate.toFixed(1)}%</strong></div>
                   <div className="metric"><span>Average R</span><strong>{backtestResult.averageR.toFixed(2)}R</strong></div>
                   <div className="metric"><span>Expectancy</span><strong>{backtestResult.expectancy.toFixed(2)}R</strong></div>
@@ -1997,6 +2102,9 @@ function App() {
                     <div className="metric"><span>Out-of-sample avg R</span><strong>{(backtestResult.outOfSample?.averageR ?? 0).toFixed(2)}R</strong></div>
                   </div>
                 )}
+                <p className="subtle-note">
+                  Costs use the brokerage and slippage entered above. Each simulated trade represents two shares (half exits at target 1); brokerage is charged per fill and slippage on each side. Gap-through stops use the candle open; trades still open at a sample boundary close at its last candle. Taxes are excluded. This is one symbol split chronologically 70/30, not broad-market validation.
+                </p>
                 {(backtestResult.numberOfTrades < 30 || (backtestResult.symbolsTested ?? 1) < 30) && <p className="subtle-note" role="note">Warning: fewer than 30 trades in this sample; this result is too small for reliable conclusions.</p>}
                 {backtestResult.inSample && backtestResult.outOfSample &&
                   (backtestResult.outOfSample.averageR ?? 0) < (backtestResult.inSample.averageR ?? 0) * (TRADING_THRESHOLDS.muchWorseOutOfSampleRatio ?? 0.5) && (

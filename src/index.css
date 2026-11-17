@@ -381,6 +381,13 @@ select {
   color: var(--app-text);
 }
 
+.app-shell[data-theme='light'] .strategy-selector,
+.app-shell[data-theme='light'] .entry-reference {
+  border-color: var(--app-border);
+  background: var(--control-background);
+  color: var(--app-text);
+}
+
 .app-header {
   padding-top: env(safe-area-inset-top);
 }
@@ -1861,6 +1868,100 @@ select {
   width: 20px;
   height: 20px;
   accent-color: var(--accent);
+}
+
+.strategy-selector {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  margin: 0 0 14px;
+  padding: 10px 14px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.strategy-selector legend {
+  padding: 0 5px;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.strategy-selector label {
+  display: grid;
+  min-width: min(100%, 240px);
+  grid-template-columns: 18px 1fr;
+  align-items: center;
+  column-gap: 8px;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.strategy-selector input {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--accent);
+}
+
+.strategy-selector small {
+  grid-column: 2;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.entry-status {
+  display: block;
+  font-size: 18px;
+}
+
+.entry-checklist {
+  display: grid;
+  gap: 7px;
+  margin: 4px 0;
+  padding: 0;
+  list-style: none;
+}
+
+.entry-checklist li {
+  display: grid;
+  grid-template-columns: 76px 1fr;
+  gap: 8px;
+  align-items: start;
+  font-size: 13px;
+}
+
+.entry-checklist li > span {
+  font-weight: 700;
+}
+
+.entry-checklist .is-passed > span {
+  color: var(--up);
+}
+
+.entry-checklist .is-pending > span {
+  color: var(--warn);
+}
+
+.entry-reference {
+  display: block;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface-2);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.score-breakdown-details > summary {
+  color: var(--accent);
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.score-breakdown-details > .subtle-note {
+  margin: 8px 0;
 }
 
 .market-status,

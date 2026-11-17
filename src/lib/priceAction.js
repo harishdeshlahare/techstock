@@ -90,7 +90,7 @@ function getActiveZones(candles, currentIndex, lookback, type, direction) {
     if (!zone) continue;
 
     let mitigated = false;
-    for (let cursor = zone.formedAt + 1; cursor < currentIndex; cursor += 1) {
+    for (let cursor = zone.formedAt + 1; cursor <= currentIndex; cursor += 1) {
       const candle = candles[cursor];
       if (!validCandle(candle)) continue;
       if (direction === 'Long' ? candle.low <= zone.lower : candle.high >= zone.upper) {

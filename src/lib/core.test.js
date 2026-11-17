@@ -6,6 +6,8 @@ import { buildTradeReport } from './tradeReport.js';
 import { updateTradeHistory } from './tradeHistory.js';
 import { searchIndianIndices } from './indices.js';
 import { getPriceActionContext } from './priceAction.js';
+import { evaluateEntrySignals, getSignalLevelLookback } from './signalRules.js';
+import { backtestSignals } from './backtest.js';
 import viteConfig from '../../vite.config.js';
 import {
   calculatePositionPnl,
@@ -21,6 +23,41 @@ afterEach(() => {
 });
 
 describe('market-data utilities', () => {
+  it('uses the same required entry checks for both strategy modes', () => {
+    const candles = [{ time: 1, open: 100, high: 101, low: 99.7, close: 100.5, volume: 100 }];
+    const levels = {
+      supports: [{ price: 100.1 }],
+      resistances: [{ price: 102 }],
+    };
+    const base = {
+      candles,
+      ema9: 100.4,
+      ema21: 100.2,
+      atr: 1,
+      supports: levels.supports,
+      resistances: levels.resistances,
+    };
+
+    expect(evaluateEntrySignals(base).longSignal).toBe(true);
+    expect(evaluateEntrySignals({
+      ...base,
+      strategy: 'price-action',
+      priceAction: { longRetest: false, shortRetest: false },
+    }).longSignal).toBe(false);
+    expect(evaluateEntrySignals({
+      ...base,
+      strategy: 'price-action',
+      priceAction: { longRetest: true, shortRetest: false },
+    }).longSignal).toBe(true);
+  });
+
+  it('shares each chart timeframe lookback with signal calculations', () => {
+    expect(getSignalLevelLookback('1min')).toBe(120);
+    expect(getSignalLevelLookback('15min')).toBe(100);
+    expect(getSignalLevelLookback('1h')).toBe(80);
+    expect(getSignalLevelLookback('unknown')).toBe(120);
+  });
+
   it('calculates moving averages and RSI with timestamped output', () => {
     const candles = [
       { time: 1, high: 2, low: 0, close: 1 },
@@ -80,6 +117,51 @@ describe('market-data utilities', () => {
 
     expect(context.bullishOrderBlock).toMatchObject({ lower: 11.5, upper: 12.8, formedAt: 6 });
     expect(context.longOrderBlockRetest).toBe(true);
+  });
+
+  it('keeps the original support/resistance backtest available alongside price-action mode', () => {
+    let seed = 1;
+    const random = () => {
+      seed = (seed * 1664525 + 1013904223) >>> 0;
+      return seed / 4294967296;
+    };
+    const candles = [];
+    let previousClose = 100;
+    for (let index = 0; index < 80; index += 1) {
+      const drift = (random() - 0.49) * 1.8;
+      const open = previousClose + (random() - 0.5) * 0.8;
+      const close = Math.max(2, open + drift);
+      candles.push({
+        time: index + 1,
+        open,
+        high: Math.max(open, close) + random() * 0.5,
+        low: Math.min(open, close) - random() * 0.5,
+        close,
+        volume: 1000,
+      });
+      previousClose = close;
+    }
+
+    const originalStrategy = backtestSignals(candles);
+    const priceActionStrategy = backtestSignals(candles, { strategy: 'price-action' });
+    const brokerageBacktest = backtestSignals(candles, { brokeragePerOrder: 3 });
+    const slippageBacktest = backtestSignals(candles, { slippagePercent: 0.5 });
+    expect(originalStrategy.numberOfTrades).toBeGreaterThan(priceActionStrategy.numberOfTrades);
+    expect(originalStrategy.numberOfTrades).toBeGreaterThan(0);
+    expect(originalStrategy.trades.every((trade) => trade.tradingCosts === 0 && trade.pnl === trade.grossPnl)).toBe(true);
+    expect(brokerageBacktest.trades.every((trade) => (
+      trade.tradingCosts === (trade.partialTargetReached ? 9 : 6)
+    ))).toBe(true);
+    expect(slippageBacktest.totalCosts).toBeGreaterThan(0);
+    expect(brokerageBacktest.net.totalPnl).toBeCloseTo(
+      brokerageBacktest.gross.totalPnl - brokerageBacktest.totalCosts,
+    );
+    expect(brokerageBacktest.inSample.net.totalPnl).toBeCloseTo(
+      brokerageBacktest.inSample.gross.totalPnl - brokerageBacktest.inSample.totalCosts,
+    );
+    expect(brokerageBacktest.outOfSample.net.totalPnl).toBeCloseTo(
+      brokerageBacktest.outOfSample.gross.totalPnl - brokerageBacktest.outOfSample.totalCosts,
+    );
   });
 
   it('parses Yahoo candles and excludes the unfinished daily candle', () => {
