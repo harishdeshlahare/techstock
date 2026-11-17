@@ -1,8 +1,8 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { createChart, createSeriesMarkers, CandlestickSeries, LineSeries, HistogramSeries } from 'lightweight-charts';
 import { calculateATR, calculateEMA, calculateRSI, calculateVWAP, getTrend } from './lib/indicators.js';
 import { buildTradeLevels, findSupportResistance } from './lib/levels.js';
-import { backtestSignals } from './lib/backtest.js';
+import { backtestSignals, backtestSymbols } from './lib/backtest.js';
 import { updateTradeHistory } from './lib/tradeHistory.js';
 import { getMarketStatus } from './lib/marketStatus.js';
 import { getPriceActionContext } from './lib/priceAction.js';
@@ -260,6 +260,10 @@ function App() {
   const [scannerSort, setScannerSort] = useState('score');
   const [showOnlyQualified, setShowOnlyQualified] = useState(false);
   const [backtestResult, setBacktestResult] = useState(null);
+  const [watchlistBacktest, setWatchlistBacktest] = useState(null);
+  const [watchlistBacktestLoading, setWatchlistBacktestLoading] = useState(false);
+  const [watchlistBacktestIssues, setWatchlistBacktestIssues] = useState([]);
+  const watchlistBacktestCacheRef = useRef(new Map());
   const crosshairLegendRef = useRef(null);
   const [lastUpdated, setLastUpdated] = useState(null);
   const [marketTradingPeriod, setMarketTradingPeriod] = useState(null);
@@ -271,6 +275,22 @@ function App() {
   const watchlistQuoteCacheRef = useRef(new Map());
   const { startScan, cancelScan } = useScanner(market, activeTab);
   const symbolMarketKey = `${getYahooSymbol(selectedStock, market)}|${market}`;
+  const watchlistBacktestResult = useMemo(() => {
+    if (
+      !watchlistBacktest
+      || watchlistBacktest.market !== market
+      || watchlistBacktest.timeframe !== timeframe
+      || watchlistBacktest.strategy !== selectedStrategy
+      || watchlistBacktest.selectedSymbol !== getYahooSymbol(selectedStock, market)
+    ) return null;
+    return backtestSymbols(watchlistBacktest.symbols, {
+      interval: timeframe,
+      strategy: selectedStrategy,
+      levelLookback: getSignalLevelLookback(timeframe),
+      brokeragePerOrder: Number(brokeragePerOrder) || 0,
+      slippagePercent: Number(slippagePercent) || 0,
+    });
+  }, [watchlistBacktest, market, timeframe, selectedStrategy, selectedStock, brokeragePerOrder, slippagePercent]);
   // Toggles
   const [showVolume, setShowVolume] = useState(true);
   const [showSR, setShowSR] = useState(true);
@@ -1207,6 +1227,88 @@ function App() {
     setSelectedStock(nextStock);
   }
 
+  async function runWatchlistBacktest() {
+    const intervalCode = {
+      '1min': '1m', '2min': '2m', '5min': '5m', '15min': '15m',
+      '30min': '30m', '1h': '60m', '90min': '90m', '1day': '1d',
+      '1week': '1wk', '1month': '1mo',
+    }[timeframe];
+    const range = {
+      '1min': '7d', '2min': '1mo', '5min': '1mo', '15min': '1mo',
+      '30min': '1mo', '1h': '1mo', '90min': '1mo', '1day': '1y',
+      '1week': '5y', '1month': '10y',
+    }[timeframe];
+    const selectedSymbol = getYahooSymbol(selectedStock, market);
+    const stocks = [selectedStock, ...(watchlists[market] || [])]
+      .filter((stock) => stock && stock.instrumentType !== 'INDEX');
+    const uniqueStocks = [...new Map(stocks.map((stock) => [getYahooSymbol(stock, market), stock])).values()]
+      .slice(0, 5);
+    const symbols = [];
+    const issues = [];
+
+    setWatchlistBacktest(null);
+    setWatchlistBacktestIssues([]);
+    setWatchlistBacktestLoading(true);
+    try {
+      for (const stock of uniqueStocks) {
+        const yahooSymbol = getYahooSymbol(stock, market);
+        const cacheKey = `${yahooSymbol}|${timeframe}|${range}`;
+        const cached = watchlistBacktestCacheRef.current.get(cacheKey);
+        try {
+          let candles;
+          let timeZone;
+          const currentChartData = latestChartDataRef.current;
+          if (currentChartData?.symbol === yahooSymbol && currentChartData.interval === timeframe) {
+            candles = currentChartData.signalCandles;
+            timeZone = currentChartData.timeZone;
+          } else if (cached && cached.expiresAt > Date.now()) {
+            ({ candles, timeZone } = cached);
+          } else {
+            const params = new URLSearchParams({ interval: intervalCode, range, events: 'div,splits' });
+            const data = await fetchYahooJson(
+              `/api/yahoo/v8/finance/chart/${encodeURIComponent(yahooSymbol)}?${params}`,
+              yahooApiBaseUrl,
+            );
+            const result = data.chart?.result?.[0];
+            if (data.chart?.error || !result) {
+              throw new Error(data.chart?.error?.description || 'No chart data was returned.');
+            }
+            candles = getClosedCandles(parseYahooCandles(result), result, timeframe, Date.now());
+            timeZone = result.meta?.exchangeTimezoneName || (market === 'India' ? 'Asia/Kolkata' : 'America/New_York');
+            watchlistBacktestCacheRef.current.set(cacheKey, {
+              candles,
+              timeZone,
+              expiresAt: Date.now() + 5 * 60_000,
+            });
+          }
+          if (!Array.isArray(candles) || candles.length < 24) {
+            throw new Error('Fewer than 24 closed candles are available.');
+          }
+          symbols.push({ symbol: stock.symbol, candles, timeZone });
+        } catch (error) {
+          issues.push(`${stock.symbol}: ${error.message || 'Historical data unavailable.'}`);
+          if (error.message?.includes('(HTTP 429)')) break;
+        }
+      }
+
+      if (symbols.length === 0) {
+        issues.push('No symbols had enough historical data to test.');
+      }
+      setWatchlistBacktest({
+        market,
+        timeframe,
+        strategy: selectedStrategy,
+        selectedSymbol,
+        symbols,
+      });
+      setWatchlistBacktestIssues(issues);
+    } catch (error) {
+      setWatchlistBacktestIssues([error.message || 'Unable to run the watchlist backtest.']);
+    } finally {
+      setWatchlistBacktestLoading(false);
+    }
+  }
+
   function addToWatchlist(stock = selectedStock) {
     setWatchlists((current) => {
       const currentList = current[market] || [];
@@ -2079,8 +2181,30 @@ function App() {
               {selectedStrategy === 'price-action'
                 ? 'This simulation requires a confirmed FVG or order-block retest together with the existing EMA, candle, and nearby support/resistance checks.'
                 : 'This simulation uses the original EMA, candle, and nearby support/resistance rules.'}
-              {' '}It uses only loaded historical candles, is a simplified heuristic, and does not predict future results.
+              {' '}The chart simulation uses loaded historical candles; the optional watchlist test below fetches data for up to five symbols. These are simplified heuristics, not predictions.
             </p>
+            <button type="button" className="scan-button" onClick={runWatchlistBacktest} disabled={watchlistBacktestLoading}>
+              {watchlistBacktestLoading ? 'Testing watchlist…' : 'Test selected stock + watchlist (up to 5)'}
+            </button>
+            {watchlistBacktestIssues.length > 0 && (
+              <p className="subtle-note" role="alert">{watchlistBacktestIssues.join(' ')}</p>
+            )}
+            {watchlistBacktestResult && (
+              <>
+                <p className="subtle-note">Tested: {watchlistBacktest.symbols.map((item) => item.symbol).join(', ') || 'none'}.</p>
+                <div className="metrics-grid">
+                  <div className="metric"><span>Symbols tested</span><strong>{watchlistBacktestResult.symbolsTested}</strong></div>
+                  <div className="metric"><span>Combined trades</span><strong>{watchlistBacktestResult.numberOfTrades}</strong></div>
+                  <div className="metric"><span>Combined net P&amp;L</span><strong>{watchlistBacktestResult.net.totalPnl.toFixed(2)}</strong></div>
+                  <div className="metric"><span>Out-of-sample net P&amp;L</span><strong>{watchlistBacktestResult.outOfSample.net.totalPnl.toFixed(2)}</strong></div>
+                  <div className="metric"><span>Out-of-sample expectancy</span><strong>{watchlistBacktestResult.outOfSample.averageR.toFixed(2)}R</strong></div>
+                  <div className="metric"><span>Out-of-sample win rate</span><strong>{watchlistBacktestResult.outOfSample.winRate.toFixed(1)}%</strong></div>
+                </div>
+                <p className="subtle-note">
+                  Each symbol is tested independently with its own chronological 70/30 split. Up to five stocks are included; combined P&amp;L assumes two shares per trade and is not capital-weighted or a portfolio simulation. Results can overlap in time and are not broad-market proof.
+                </p>
+              </>
+            )}
             {backtestResult && (
               <>
                 <div className="metrics-grid">

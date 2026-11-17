@@ -7,7 +7,7 @@ import { updateTradeHistory } from './tradeHistory.js';
 import { searchIndianIndices } from './indices.js';
 import { getPriceActionContext } from './priceAction.js';
 import { evaluateEntrySignals, getSignalLevelLookback } from './signalRules.js';
-import { backtestSignals } from './backtest.js';
+import { backtestSignals, backtestSymbols } from './backtest.js';
 import viteConfig from '../../vite.config.js';
 import {
   calculatePositionPnl,
@@ -146,6 +146,11 @@ describe('market-data utilities', () => {
     const priceActionStrategy = backtestSignals(candles, { strategy: 'price-action' });
     const brokerageBacktest = backtestSignals(candles, { brokeragePerOrder: 3 });
     const slippageBacktest = backtestSignals(candles, { slippagePercent: 0.5 });
+    const multiSymbolBacktest = backtestSymbols([
+      { symbol: 'AAA', candles },
+      { symbol: 'BBB', candles },
+      null,
+    ], { brokeragePerOrder: 3 });
     expect(originalStrategy.numberOfTrades).toBeGreaterThan(priceActionStrategy.numberOfTrades);
     expect(originalStrategy.numberOfTrades).toBeGreaterThan(0);
     expect(originalStrategy.trades.every((trade) => trade.tradingCosts === 0 && trade.pnl === trade.grossPnl)).toBe(true);
@@ -162,6 +167,11 @@ describe('market-data utilities', () => {
     expect(brokerageBacktest.outOfSample.net.totalPnl).toBeCloseTo(
       brokerageBacktest.outOfSample.gross.totalPnl - brokerageBacktest.outOfSample.totalCosts,
     );
+    expect(multiSymbolBacktest.symbolsTested).toBe(2);
+    expect(multiSymbolBacktest.numberOfTrades).toBe(brokerageBacktest.numberOfTrades * 2);
+    expect(multiSymbolBacktest.outOfSample.numberOfTrades).toBe(brokerageBacktest.outOfSample.numberOfTrades * 2);
+    expect(multiSymbolBacktest.net.totalPnl).toBeCloseTo(brokerageBacktest.net.totalPnl * 2);
+    expect(multiSymbolBacktest.trades.every((trade) => ['AAA', 'BBB'].includes(trade.symbol))).toBe(true);
   });
 
   it('parses Yahoo candles and excludes the unfinished daily candle', () => {

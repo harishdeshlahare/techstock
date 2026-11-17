@@ -193,3 +193,24 @@ export function backtestSignals(candles, {
   const all = summarize([...inSample.trades, ...outOfSample.trades]);
   return { ...all, inSample, outOfSample, symbolsTested: 1 };
 }
+
+export function backtestSymbols(symbolCandles, options = {}) {
+  const results = (Array.isArray(symbolCandles) ? symbolCandles : [])
+    .filter((entry) => entry && Array.isArray(entry.candles) && entry.candles.length >= 24)
+    .map(({ symbol, candles, timeZone }) => ({
+      symbol,
+      result: backtestSignals(candles, { ...options, timeZone: timeZone || options.timeZone }),
+    }));
+  const summarizePeriod = (period) => summarize(results
+    .flatMap(({ symbol, result }) => result[period].trades.map((trade) => ({ ...trade, symbol })))
+    .sort((first, second) => first.exitTime - second.exitTime));
+  const allTrades = results
+    .flatMap(({ symbol, result }) => result.trades.map((trade) => ({ ...trade, symbol })))
+    .sort((first, second) => first.exitTime - second.exitTime);
+  return {
+    ...summarize(allTrades),
+    inSample: summarizePeriod('inSample'),
+    outOfSample: summarizePeriod('outOfSample'),
+    symbolsTested: results.length,
+  };
+}
