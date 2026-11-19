@@ -6,6 +6,16 @@ import { buildTradeReport } from './tradeReport.js';
 import { updateTradeHistory } from './tradeHistory.js';
 import { searchIndianIndices } from './indices.js';
 import { getPriceActionContext } from './priceAction.js';
+import {
+  buildGrowwOptionUrl,
+  buildOptionsTechnicalSetup,
+  calculateOptionExpiryPnl,
+  getNextScheduledExpiryDate,
+  getOptionExpiryStatus,
+  getOptionLotSize,
+  parseGrowwOptionUrl,
+} from './options.js';
+import { clearGrowwQuoteCache, fetchGrowwOptionQuote } from './groww.js';
 import { evaluateEntrySignals, getSignalLevelLookback } from './signalRules.js';
 import { backtestSignals, backtestSymbols } from './backtest.js';
 import viteConfig from '../../vite.config.js';
@@ -20,9 +30,147 @@ import vercelConfig from '../../vercel.json';
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  clearGrowwQuoteCache();
 });
 
 describe('market-data utilities', () => {
+  it('parses Groww index option expiry, strike, and option type', () => {
+    expect(parseGrowwOptionUrl('https://groww.in/options/nifty/NIFTY26NOV25450CE', new Date('2026-11-20T12:00:00Z'))).toMatchObject({
+      symbol: 'NIFTY26NOV25450CE',
+      indexId: 'nifty',
+      yahooSymbol: '^NSEI',
+      expiryDate: '2026-11-26',
+      strike: 25450,
+      optionType: 'CE',
+    });
+    expect(parseGrowwOptionUrl('https://groww.in/options/banknifty/BANKNIFTY25DEC2652000PE', new Date('2026-11-20T12:00:00Z'))).toMatchObject({
+      expiryDate: '2026-12-25',
+      strike: 52000,
+      optionType: 'PE',
+    });
+    expect(buildGrowwOptionUrl({
+      indexId: 'nifty',
+      expiryDate: '2026-11-26',
+      strike: 25450,
+      optionType: 'CE',
+    })).toBe('https://groww.in/options/nifty/NIFTY26NOV25450CE');
+    const bankPutUrl = buildGrowwOptionUrl({
+      indexId: 'banknifty',
+      expiryDate: '2026-12-25',
+      strike: 52000,
+      optionType: 'PE',
+    });
+    expect(bankPutUrl).toBe('https://groww.in/options/nifty-bank/BANKNIFTY25DEC52000PE');
+    expect(parseGrowwOptionUrl(bankPutUrl, new Date('2026-11-20T12:00:00Z'))).toMatchObject({
+      indexId: 'banknifty',
+      expiryDate: '2026-12-25',
+      strike: 52000,
+      optionType: 'PE',
+    });
+    expect(parseGrowwOptionUrl(
+      'https://groww.in/options/sp-bse-sensex/SENSEX26NOV82900PE',
+      new Date('2026-11-20T12:00:00Z'),
+    )).toMatchObject({
+      symbol: 'SENSEX26NOV82900PE',
+      indexId: 'sensex',
+      yahooSymbol: '^BSESN',
+      expiryDate: '2026-11-26',
+      strike: 82900,
+      optionType: 'PE',
+    });
+    const sensexPutUrl = buildGrowwOptionUrl({
+      indexId: 'sensex',
+      expiryDate: '2026-11-26',
+      strike: 82900,
+      optionType: 'PE',
+    });
+    expect(sensexPutUrl).toBe('https://groww.in/options/sp-bse-sensex/SENSEX26NOV82900PE');
+    expect(getNextScheduledExpiryDate('sensex', new Date('2026-11-20T12:00:00Z'))).toBe('2026-11-26');
+    expect(getNextScheduledExpiryDate('banknifty', new Date('2026-11-20T12:00:00Z'))).toBe('2026-11-24');
+    expect(getNextScheduledExpiryDate('banknifty', new Date('2026-11-24T12:00:00Z'))).toBe('2026-12-29');
+    expect(getOptionLotSize('nifty')).toBe(65);
+    expect(getOptionLotSize('banknifty')).toBe(15);
+    expect(getOptionLotSize('sensex')).toBe(20);
+    expect(() => buildGrowwOptionUrl({
+      indexId: 'nifty',
+      expiryDate: '2025-11-26',
+      strike: 25450,
+      optionType: 'CE',
+    })).toThrow(/expiry date that has not passed/);
+  });
+
+  it('rejects unsupported option URLs and mismatched contract expiries', () => {
+    expect(() => parseGrowwOptionUrl('https://example.com/options/nifty/NIFTY26NOV25450CE')).toThrow(/groww\.in/);
+    expect(() => parseGrowwOptionUrl('https://groww.in/options/nifty/NIFTY31FEB25450CE')).toThrow(/invalid expiry date/);
+    expect(getOptionExpiryStatus('2025-11-26', '2026-11-20')).toBe('expired');
+    expect(getOptionExpiryStatus('2026-11-26', '2026-11-20')).toBe('active');
+  });
+
+  it('creates conditional underlying-index levels for calls and puts', () => {
+    const candles = Array.from({ length: 60 }, (_, index) => {
+      const close = 100 + index * 0.5;
+      return {
+        time: index + 1,
+        open: close - 0.2,
+        high: close + 0.5,
+        low: close - 0.5,
+        close,
+        volume: 100,
+      };
+    });
+    const callSetup = buildOptionsTechnicalSetup(candles, 'CE');
+    const putSetup = buildOptionsTechnicalSetup(candles, 'PE');
+    expect(callSetup).toMatchObject({ trend: 'Bullish', aligned: true, setupDirection: 'Long', entry: 130 });
+    expect(putSetup).toMatchObject({ trend: 'Bullish', aligned: false, setupDirection: 'Short', entry: 129 });
+    expect(callSetup.stop).toBeLessThan(callSetup.entry);
+    expect(callSetup.target1).toBeGreaterThan(callSetup.entry);
+    expect(() => buildOptionsTechnicalSetup(candles.slice(0, 20), 'CE')).toThrow(/22 completed daily/);
+  });
+
+  it('calculates option expiry scenarios against the entered premium', () => {
+    expect(calculateOptionExpiryPnl('PE', 82900, 562.85, 82000)).toMatchObject({
+      intrinsicPerUnit: 900,
+      pnlPerUnit: 337.15,
+      totalPnl: 337.15,
+      breakEven: 82337.15,
+      maximumLoss: 562.85,
+    });
+    expect(calculateOptionExpiryPnl('PE', 82900, 562.85, 83000, 2).totalPnl).toBe(-1125.7);
+    expect(calculateOptionExpiryPnl('CE', 82900, 562.85, 84000).totalPnl).toBe(537.15);
+  });
+
+  it('loads the delayed Groww option premium and contract stats via the app proxy', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        ltp: 149.9,
+        tsInMillis: 1795082400,
+      }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const contract = parseGrowwOptionUrl(
+      'https://groww.in/options/nifty/NIFTY26NOV25500CE',
+      new Date('2026-11-20T12:00:00Z'),
+    );
+
+    await expect(fetchGrowwOptionQuote(contract)).resolves.toMatchObject({
+      ltp: 149.9,
+      lotSize: 65,
+      timestamp: 1795082400000,
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/groww/stocks_fo_data/v1/tr_live_prices/exchange/NSE/segment/FNO/NIFTY26NOV25500CE/latest',
+      { signal: undefined, cache: 'no-store' },
+    );
+    fetchMock.mockClear();
+    clearGrowwQuoteCache();
+    await fetchGrowwOptionQuote(contract, { baseUrl: 'https://proxy.example.com/api/yahoo' });
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://proxy.example.com/api/groww/stocks_fo_data/v1/tr_live_prices/exchange/NSE/segment/FNO/NIFTY26NOV25500CE/latest',
+      { signal: undefined, cache: 'no-store' },
+    );
+  });
+
   it('uses the same required entry checks for both strategy modes', () => {
     const candles = [{ time: 1, open: 100, high: 101, low: 99.7, close: 100.5, volume: 100 }];
     const levels = {
@@ -241,12 +389,18 @@ describe('market-data utilities', () => {
       source: '/api/yahoo/:path*',
       destination: 'https://query1.finance.yahoo.com/:path*',
     });
+    expect(vercelConfig.rewrites).toContainEqual({
+      source: '/api/groww/:path*',
+      destination: 'https://groww.in/v1/api/:path*',
+    });
   });
 
   it('routes Vite dev and preview Yahoo API requests to Yahoo Finance', () => {
     for (const proxy of [viteConfig.server.proxy, viteConfig.preview.proxy]) {
       expect(proxy['/api/yahoo'].target).toBe('https://query1.finance.yahoo.com');
       expect(proxy['/api/yahoo'].rewrite('/api/yahoo/v8/finance/chart/AAPL')).toBe('/v8/finance/chart/AAPL');
+      expect(proxy['/api/groww'].target).toBe('https://groww.in');
+      expect(proxy['/api/groww'].rewrite('/api/groww/stocks_fo_data/v1/tr_live_prices')).toBe('/v1/api/stocks_fo_data/v1/tr_live_prices');
     }
   });
 

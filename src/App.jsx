@@ -8,7 +8,7 @@ import { getMarketStatus } from './lib/marketStatus.js';
 import { getPriceActionContext } from './lib/priceAction.js';
 import { evaluateEntrySignals, getSignalLevelLookback } from './lib/signalRules.js';
 import { DEFAULT_YAHOO_API_BASE_URL, fetchYahooJson, getClosedCandles, getYahooSymbol, normalizeYahooProxyUrl, parseYahooCandles } from './lib/yahoo.js';
-import { INDIAN_INDICES, searchIndianIndices } from './lib/indices.js';
+import { searchIndianIndices } from './lib/indices.js';
 import { TRADING_THRESHOLDS } from './lib/config/costs.js';
 import ChartView from './components/ChartView.jsx';
 import TradeReportPanel from './components/TradeReportPanel.jsx';
@@ -16,6 +16,7 @@ import TradeHistoryPanel from './components/TradeHistoryPanel.jsx';
 import DashboardHome from './components/DashboardHome.jsx';
 import MarketInspector from './components/MarketInspector.jsx';
 import PaperTradingPanel from './components/PaperTradingPanel.jsx';
+import OptionsPanel from './components/OptionsPanel.jsx';
 import { WorkspaceSidebar, WorkspaceTabs } from './components/WorkspaceNavigation.jsx';
 import { useScanner } from './hooks/useScanner.js';
 import { useTradeHistory } from './hooks/useTradeHistory.js';
@@ -1846,41 +1847,11 @@ function App() {
       )}
 
       {activeTab === 'options' && (
-        <section id="panel-options" aria-labelledby="tab-options" className="scanner-panel options-panel" role="tabpanel">
-          <div className="scanner-heading">
-            <div>
-              <h2>Indian index options</h2>
-              <p>Choose an index to open its official exchange option chain. Contract prices and open interest are shown by the exchange, not estimated by this app.</p>
-            </div>
-          </div>
-          <div className="index-option-grid">
-            {INDIAN_INDICES.map((index) => (
-              <button
-                type="button"
-                key={index.id}
-                className={selectedOptionsIndex === index.id ? 'index-option-card selected' : 'index-option-card'}
-                onClick={() => setSelectedOptionsIndex(index.id)}
-                aria-pressed={selectedOptionsIndex === index.id}
-              >
-                <strong>{index.name}</strong>
-                <span>{index.exchange} · {index.symbol}</span>
-              </button>
-            ))}
-          </div>
-          {(() => {
-            const selectedIndex = INDIAN_INDICES.find((index) => index.id === selectedOptionsIndex);
-            return (
-              <div className="option-chain-info">
-                <h3>{selectedIndex.name} option chain</h3>
-                <p>On the exchange page, review expiry, strike, Call (CE) / Put (PE), last price, change, volume, open interest, and implied volatility where available.</p>
-                <a className="scan-button option-chain-link" href={selectedIndex.url} target="_blank" rel="noreferrer">
-                  Open official {selectedIndex.exchange} option chain
-                </a>
-                <p className="subtle-note">The exchange page shows the current contracts and prices. Live option rows are not embedded in this app because it has no authorized exchange options feed; showing delayed or invented values here would be misleading.</p>
-              </div>
-            );
-          })()}
-        </section>
+        <OptionsPanel
+          selectedIndexId={selectedOptionsIndex}
+          onSelectIndex={setSelectedOptionsIndex}
+          yahooApiBaseUrl={yahooApiBaseUrl}
+        />
       )}
 
       {activeTab === 'chart' && (
