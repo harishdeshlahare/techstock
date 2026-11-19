@@ -1033,6 +1033,33 @@ select {
   gap: 12px;
 }
 
+.option-contract-import {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 10px;
+}
+
+.option-contract-import label {
+  min-width: 0;
+}
+
+.option-quote-refresh {
+  min-height: 38px;
+  padding: 8px 10px;
+  border: 1px solid var(--app-border);
+  border-radius: 6px;
+  background: var(--control-background);
+  color: var(--app-text);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.option-quote-refresh:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
 .option-type-selector {
   display: flex;
   flex-wrap: wrap;
@@ -1149,6 +1176,12 @@ select {
 
 .option-scenario-header span {
   color: var(--muted-text);
+}
+
+@media (max-width: 600px) {
+  .option-contract-import {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 .options-error {

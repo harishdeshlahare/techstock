@@ -35,48 +35,52 @@ afterEach(() => {
 
 describe('market-data utilities', () => {
   it('parses Groww index option expiry, strike, and option type', () => {
-    expect(parseGrowwOptionUrl('https://groww.in/options/nifty/NIFTY26NOV25450CE', new Date('2026-11-20T12:00:00Z'))).toMatchObject({
+    expect(parseGrowwOptionUrl('https://groww.in/options/nifty/NIFTY26NOV25450CE')).toMatchObject({
       symbol: 'NIFTY26NOV25450CE',
       indexId: 'nifty',
       yahooSymbol: '^NSEI',
-      expiryDate: '2026-11-26',
+      expiryDate: '2026-11-24',
       strike: 25450,
       optionType: 'CE',
     });
-    expect(parseGrowwOptionUrl('https://groww.in/options/banknifty/BANKNIFTY25DEC2652000PE', new Date('2026-11-20T12:00:00Z'))).toMatchObject({
-      expiryDate: '2026-12-25',
+    expect(parseGrowwOptionUrl('https://groww.in/options/banknifty/BANKNIFTY26DEC52000PE')).toMatchObject({
+      expiryDate: '2026-12-29',
       strike: 52000,
       optionType: 'PE',
     });
     expect(buildGrowwOptionUrl({
       indexId: 'nifty',
-      expiryDate: '2026-11-26',
+      expiryDate: '2026-11-24',
       strike: 25450,
       optionType: 'CE',
     })).toBe('https://groww.in/options/nifty/NIFTY26NOV25450CE');
     const bankPutUrl = buildGrowwOptionUrl({
       indexId: 'banknifty',
-      expiryDate: '2026-12-25',
+      expiryDate: '2026-12-29',
       strike: 52000,
       optionType: 'PE',
     });
-    expect(bankPutUrl).toBe('https://groww.in/options/nifty-bank/BANKNIFTY25DEC52000PE');
-    expect(parseGrowwOptionUrl(bankPutUrl, new Date('2026-11-20T12:00:00Z'))).toMatchObject({
+    expect(bankPutUrl).toBe('https://groww.in/options/nifty-bank/BANKNIFTY26DEC52000PE');
+    expect(parseGrowwOptionUrl(bankPutUrl)).toMatchObject({
       indexId: 'banknifty',
-      expiryDate: '2026-12-25',
+      expiryDate: '2026-12-29',
       strike: 52000,
       optionType: 'PE',
     });
-    expect(parseGrowwOptionUrl(
-      'https://groww.in/options/sp-bse-sensex/SENSEX26NOV82900PE',
-      new Date('2026-11-20T12:00:00Z'),
-    )).toMatchObject({
+    expect(parseGrowwOptionUrl('https://groww.in/options/sp-bse-sensex/SENSEX26NOV82900PE')).toMatchObject({
       symbol: 'SENSEX26NOV82900PE',
       indexId: 'sensex',
       yahooSymbol: '^BSESN',
       expiryDate: '2026-11-26',
       strike: 82900,
       optionType: 'PE',
+    });
+    expect(parseGrowwOptionUrl('https://groww.in/options/nifty-bank/BANKNIFTY24NOV63100CE')).toMatchObject({
+      symbol: 'BANKNIFTY24NOV63100CE',
+      indexId: 'banknifty',
+      expiryDate: '2024-11-27',
+      strike: 63100,
+      optionType: 'CE',
     });
     const sensexPutUrl = buildGrowwOptionUrl({
       indexId: 'sensex',
@@ -88,20 +92,28 @@ describe('market-data utilities', () => {
     expect(getNextScheduledExpiryDate('sensex', new Date('2026-11-20T12:00:00Z'))).toBe('2026-11-26');
     expect(getNextScheduledExpiryDate('banknifty', new Date('2026-11-20T12:00:00Z'))).toBe('2026-11-24');
     expect(getNextScheduledExpiryDate('banknifty', new Date('2026-11-24T12:00:00Z'))).toBe('2026-12-29');
+    expect(getNextScheduledExpiryDate('nifty', new Date('2026-11-20T12:00:00Z'))).toBe('2026-11-24');
     expect(getOptionLotSize('nifty')).toBe(65);
     expect(getOptionLotSize('banknifty')).toBe(15);
     expect(getOptionLotSize('sensex')).toBe(20);
+    expect(calculateOptionExpiryPnl('CE', 63100, 114.55, 63200, 150).totalPnl).toBeCloseTo(-2182.5);
     expect(() => buildGrowwOptionUrl({
       indexId: 'nifty',
       expiryDate: '2025-11-26',
       strike: 25450,
       optionType: 'CE',
     })).toThrow(/expiry date that has not passed/);
+    expect(() => buildGrowwOptionUrl({
+      indexId: 'nifty',
+      expiryDate: '2026-11-26',
+      strike: 25450,
+      optionType: 'CE',
+    })).toThrow(/scheduled monthly expiry date: 2026-11-24/);
   });
 
   it('rejects unsupported option URLs and mismatched contract expiries', () => {
     expect(() => parseGrowwOptionUrl('https://example.com/options/nifty/NIFTY26NOV25450CE')).toThrow(/groww\.in/);
-    expect(() => parseGrowwOptionUrl('https://groww.in/options/nifty/NIFTY31FEB25450CE')).toThrow(/invalid expiry date/);
+    expect(() => parseGrowwOptionUrl('https://groww.in/options/nifty/NIFTY26FOO25450CE')).toThrow(/invalid expiry month/);
     expect(getOptionExpiryStatus('2025-11-26', '2026-11-20')).toBe('expired');
     expect(getOptionExpiryStatus('2026-11-26', '2026-11-20')).toBe('active');
   });
@@ -125,6 +137,9 @@ describe('market-data utilities', () => {
     expect(callSetup.stop).toBeLessThan(callSetup.entry);
     expect(callSetup.target1).toBeGreaterThan(callSetup.entry);
     expect(() => buildOptionsTechnicalSetup(candles.slice(0, 20), 'CE')).toThrow(/22 completed daily/);
+    expect(buildOptionsTechnicalSetup(candles, 'CE', { interval: '1h' }).timeframe).toBe('1h');
+    expect(() => buildOptionsTechnicalSetup(candles.slice(0, 20), 'CE', { interval: '15min' }))
+      .toThrow(/22 completed 15min/);
   });
 
   it('calculates option expiry scenarios against the entered premium', () => {
@@ -148,10 +163,7 @@ describe('market-data utilities', () => {
       }),
     });
     vi.stubGlobal('fetch', fetchMock);
-    const contract = parseGrowwOptionUrl(
-      'https://groww.in/options/nifty/NIFTY26NOV25500CE',
-      new Date('2026-11-20T12:00:00Z'),
-    );
+    const contract = parseGrowwOptionUrl('https://groww.in/options/nifty/NIFTY26NOV25500CE');
 
     await expect(fetchGrowwOptionQuote(contract)).resolves.toMatchObject({
       ltp: 149.9,

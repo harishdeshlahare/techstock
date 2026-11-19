@@ -14,6 +14,13 @@ import { fetchGrowwOptionQuote } from '../lib/groww.js';
 import { INDIAN_INDICES } from '../lib/indices.js';
 
 const OPTION_INDICES = INDIAN_INDICES;
+const OPTION_TIMEFRAMES = {
+  '1min': { label: '1 minute', interval: '1m', range: '7d' },
+  '5min': { label: '5 minutes', interval: '5m', range: '1mo' },
+  '15min': { label: '15 minutes', interval: '15m', range: '1mo' },
+  '1h': { label: '1 hour', interval: '60m', range: '1mo' },
+  '1day': { label: 'Daily', interval: '1d', range: '6mo' },
+};
 
 function formatPrice(price) {
   return Number.isFinite(price)
@@ -30,11 +37,12 @@ function formatExpiry(date) {
   }).format(new Date(`${date}T00:00:00Z`));
 }
 
-function formatCandleDate(time, timeZone) {
+function formatCandleDate(time, timeZone, timeframe) {
   return new Intl.DateTimeFormat('en-IN', {
     day: '2-digit',
     month: 'short',
     year: 'numeric',
+    ...(timeframe === '1day' ? {} : { hour: '2-digit', minute: '2-digit' }),
     timeZone,
   }).format(new Date(time * 1000));
 }
@@ -51,6 +59,8 @@ export default function OptionsPanel({ selectedIndexId, onSelectIndex, yahooApiB
   const [expiryDate, setExpiryDate] = useState(() => getNextScheduledExpiryDate('nifty'));
   const [strike, setStrike] = useState('');
   const [optionType, setOptionType] = useState('CE');
+  const [contractUrlInput, setContractUrlInput] = useState('');
+  const [analysisTimeframe, setAnalysisTimeframe] = useState('1h');
   const [premiumOverride, setPremiumOverride] = useState(null);
   const [lotCount, setLotCount] = useState('1');
   const [optionQuote, setOptionQuote] = useState(null);
@@ -97,7 +107,7 @@ export default function OptionsPanel({ selectedIndexId, onSelectIndex, yahooApiB
           source: Number.isFinite(quote) && quote > 0 ? 'Yahoo Finance index quote' : 'Last available daily close',
         });
         const step = getOptionStrikeStep(selectedIndex.id);
-        setStrike(String(Math.round(price / step) * step));
+        setStrike((currentStrike) => currentStrike || String(Math.round(price / step) * step));
       } catch (quoteError) {
         if (!controller.signal.aborted) setSpotError(quoteError.message || 'Unable to load the current index value.');
       } finally {
@@ -145,31 +155,43 @@ export default function OptionsPanel({ selectedIndexId, onSelectIndex, yahooApiB
         return;
       }
 
-      const params = new URLSearchParams({ interval: '1d', range: '6mo', events: 'div,splits' });
+      const selectedTimeframe = OPTION_TIMEFRAMES[analysisTimeframe];
+      const params = new URLSearchParams({
+        interval: selectedTimeframe.interval,
+        range: selectedTimeframe.range,
+        events: 'div,splits',
+      });
       const data = await fetchYahooJson(
         `/api/yahoo/v8/finance/chart/${encodeURIComponent(contract.yahooSymbol)}?${params}`,
         yahooApiBaseUrl,
         { ttl: 30_000 },
       );
       const result = data.chart?.result?.[0];
-      const candles = getClosedCandles(parseYahooCandles(result), result, '1day');
+      const candles = getClosedCandles(parseYahooCandles(result), result, analysisTimeframe);
       if (data.chart?.error || !candles.length) {
-        throw new Error(data.chart?.error?.description || 'No completed daily index candles were returned.');
+        throw new Error(data.chart?.error?.description || `No completed ${selectedTimeframe.label} index candles were returned.`);
       }
-      const setup = buildOptionsTechnicalSetup(candles, contract.optionType);
+      const setup = buildOptionsTechnicalSetup(candles, contract.optionType, { interval: analysisTimeframe });
       const metaPrice = Number(result?.meta?.regularMarketPrice);
       const candlePrice = candles.at(-1).close;
       const underlyingPrice = Number.isFinite(metaPrice) && metaPrice > 0 ? metaPrice : candlePrice;
       setCurrentSpot({
         price: underlyingPrice,
-        source: Number.isFinite(metaPrice) && metaPrice > 0 ? 'Yahoo Finance index quote' : 'Last available daily close',
+        source: Number.isFinite(metaPrice) && metaPrice > 0
+          ? 'Yahoo Finance index quote'
+          : `Last available ${selectedTimeframe.label.toLowerCase()} candle`,
       });
       setAnalysis({
         contract,
         setup,
         expired: false,
         underlyingPrice,
-        candleDate: formatCandleDate(candles.at(-1).time, result.meta?.exchangeTimezoneName || 'Asia/Kolkata'),
+        candleDate: formatCandleDate(
+          candles.at(-1).time,
+          result.meta?.exchangeTimezoneName || 'Asia/Kolkata',
+          analysisTimeframe,
+        ),
+        timeframe: selectedTimeframe.label,
       });
     } catch (analysisError) {
       setError(analysisError.message || 'Unable to analyze this option contract.');
@@ -185,6 +207,21 @@ export default function OptionsPanel({ selectedIndexId, onSelectIndex, yahooApiB
       return;
     }
     await analyzeContract(generatedUrl);
+  }
+
+  function loadContractFromUrl() {
+    setError('');
+    try {
+      const contract = parseGrowwOptionUrl(contractUrlInput);
+      onSelectIndex(contract.indexId);
+      setExpiryDate(contract.expiryDate);
+      setStrike(String(contract.strike));
+      setOptionType(contract.optionType);
+      setPremiumOverride(null);
+      setAnalysis(null);
+    } catch (urlError) {
+      setError(urlError.message || 'Enter a supported Groww option contract URL.');
+    }
   }
 
   function handleIndexSelect(indexId) {
@@ -211,7 +248,7 @@ export default function OptionsPanel({ selectedIndexId, onSelectIndex, yahooApiB
   const lotSize = getOptionLotSize(selectedIndex.id);
   const quantityValue = lotCountValue * lotSize;
   const hasOptionInputs = Number.isFinite(premiumValue) && premiumValue >= 0 &&
-    Number.isInteger(lotCountValue) && lotCountValue >= 1 && lotCountValue <= 2;
+    Number.isInteger(lotCountValue) && lotCountValue >= 1 && lotCountValue <= 10;
   const scenarioLevels = analysis?.setup && currentSpot?.price
     ? [
       { label: 'Current index value', underlying: currentSpot.price },
@@ -252,11 +289,25 @@ export default function OptionsPanel({ selectedIndexId, onSelectIndex, yahooApiB
         </a>
         <p className="subtle-note">Current index value: {spotLoading ? 'loading…' : currentSpot ? `${formatPrice(currentSpot.price)} (${currentSpot.source})` : 'unavailable'}.</p>
         {spotError && <p className="options-error" role="status">{spotError}</p>}
-        <p className="subtle-note">The expiry defaults to the next scheduled weekday and the strike to the nearest standard increment; confirm both are listed on Groww, including holiday changes.</p>
+        <p className="subtle-note">The expiry defaults to the next scheduled monthly expiry and the strike to the nearest standard increment. Confirm contract availability and holiday-adjusted dates on Groww.</p>
       </div>
 
       <form className="option-analysis-form" onSubmit={analyzeOption}>
         <h3>Build and analyze contract</h3>
+        <div className="option-contract-import">
+          <label>
+            Or paste an existing Groww contract URL
+            <input
+              type="url"
+              value={contractUrlInput}
+              onChange={(event) => setContractUrlInput(event.target.value)}
+              placeholder="https://groww.in/options/nifty-bank/BANKNIFTY24NOV63100CE"
+            />
+          </label>
+          <button type="button" className="option-quote-refresh" disabled={!contractUrlInput.trim()} onClick={loadContractFromUrl}>
+            Load contract from URL
+          </button>
+        </div>
         <div className="option-builder-fields">
           <label>
             Expiry
@@ -282,6 +333,14 @@ export default function OptionsPanel({ selectedIndexId, onSelectIndex, yahooApiB
           ))}
         </fieldset>
         <label>
+          Technical setup timeframe
+          <select value={analysisTimeframe} onChange={(event) => setAnalysisTimeframe(event.target.value)}>
+            {Object.entries(OPTION_TIMEFRAMES).map(([value, timeframe]) => (
+              <option value={value} key={value}>{timeframe.label}</option>
+            ))}
+          </select>
+        </label>
+        <label>
           Generated Groww contract URL
           <input type="url" value={generatedUrl} readOnly aria-describedby="option-url-help" />
         </label>
@@ -301,8 +360,9 @@ export default function OptionsPanel({ selectedIndexId, onSelectIndex, yahooApiB
           <label>
             Lots
             <select value={lotCount} onChange={(event) => setLotCount(event.target.value)}>
-              <option value="1">1 lot</option>
-              <option value="2">2 lots</option>
+              {Array.from({ length: 10 }, (_, index) => index + 1).map((count) => (
+                <option value={String(count)} key={count}>{count} {count === 1 ? 'lot' : 'lots'}</option>
+              ))}
             </select>
           </label>
         </div>
@@ -356,7 +416,7 @@ export default function OptionsPanel({ selectedIndexId, onSelectIndex, yahooApiB
             {!analysis.expired && (
               <>
                 <div><span>Underlying index</span><strong>{selectedIndex.name}</strong></div>
-                <div><span>Last completed candle</span><strong>{analysis.candleDate}</strong></div>
+                <div><span>Last completed {analysis.timeframe} candle</span><strong>{analysis.candleDate}</strong></div>
                 <div><span>Current index value</span><strong>{formatPrice(analysis.underlyingPrice)}</strong></div>
                 <div><span>Option premium (Groww delayed)</span><strong>{Number.isFinite(premiumValue) ? `₹${formatPrice(premiumValue)}` : 'Quote unavailable'}</strong></div>
                 <div><span>Lots / quantity</span><strong>{lotCountValue} × {lotSize} = {quantityValue} units</strong></div>
@@ -366,7 +426,7 @@ export default function OptionsPanel({ selectedIndexId, onSelectIndex, yahooApiB
                   <strong>{analysis.setup.aligned ? 'Aligned' : 'Not aligned — wait'}</strong>
                 </div>
                 <div>
-                  <span>Entry trigger (index)</span>
+                  <span>Entry trigger (index · {analysis.timeframe})</span>
                   <strong>{analysis.setup.setupDirection === 'Short' ? 'Below' : 'Above'} {formatPrice(analysis.setup.entry)}</strong>
                 </div>
                 <div><span>Stop reference (index)</span><strong>{formatPrice(analysis.setup.stop)}</strong></div>
@@ -426,7 +486,7 @@ export default function OptionsPanel({ selectedIndexId, onSelectIndex, yahooApiB
             ? <p className="options-error" role="status">This contract expired on {formatExpiry(analysis.contract.expiryDate)}. No entry, stop, or target is shown for an expired contract.</p>
             : (
               <p className="subtle-note">
-                Levels are technical references on the underlying index, derived from completed daily candles using {analysis.setup.method.toLowerCase()}.
+                Levels are technical references on the underlying index, derived from completed {analysis.timeframe.toLowerCase()} candles using {analysis.setup.method.toLowerCase()}.
                 They are not option premium entry, stop, or target prices. The trigger is a break of the last completed candle; confirm live data and risk independently.
               </p>
             )}
