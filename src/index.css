@@ -24,6 +24,20 @@
   -moz-osx-font-smoothing: grayscale;
 }
 
+.option-type-selector .option-auto-direction {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted-text);
+  font-size: 12px;
+}
+
+.option-type-selector .option-auto-direction input {
+  width: auto;
+  margin: 0;
+}
+
 * {
   box-sizing: border-box;
 }
@@ -1011,6 +1025,93 @@ select {
   border-radius: 8px;
   background: var(--control-background);
   color: var(--app-text);
+}
+
+.option-backtest {
+  display: grid;
+  gap: 10px;
+  margin-top: 16px;
+  padding: 14px;
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  background: var(--control-background);
+  color: var(--app-text);
+}
+
+.option-backtest h3 {
+  margin: 0;
+  color: var(--app-text);
+  font-size: 14px;
+}
+
+.option-backtest-result {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.option-backtest-row {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(150px, 1fr));
+  gap: 8px;
+  min-width: 900px;
+  padding: 9px 10px;
+  border-bottom: 1px solid var(--app-border);
+  font-size: 12px;
+}
+
+.option-backtest-row:last-child {
+  border-bottom: 0;
+}
+
+.option-backtest-header {
+  background: var(--panel-background);
+  font-weight: 700;
+}
+
+.option-backtest-header span {
+  color: var(--muted-text);
+}
+
+.liquidity-backtest {
+  display: grid;
+  gap: 8px;
+}
+
+.liquidity-backtest h3 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.liquidity-backtest-wrap {
+  width: 100%;
+  overflow-x: auto;
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+}
+
+.liquidity-backtest table {
+  width: 100%;
+  min-width: 1080px;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.liquidity-backtest th,
+.liquidity-backtest td {
+  padding: 9px 10px;
+  border-bottom: 1px solid var(--app-border);
+  text-align: left;
+  white-space: nowrap;
+}
+
+.liquidity-backtest th {
+  background: var(--panel-background);
+  color: var(--muted-text);
+}
+
+.liquidity-backtest tr:last-child td {
+  border-bottom: 0;
 }
 
 .option-analysis-form h3,

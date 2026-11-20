@@ -12,6 +12,8 @@ import {
 import { fetchYahooJson, getClosedCandles, parseYahooCandles } from '../lib/yahoo.js';
 import { fetchGrowwOptionQuote } from '../lib/groww.js';
 import { INDIAN_INDICES } from '../lib/indices.js';
+import { backtestSignals } from '../lib/backtest.js';
+import { getTrend } from '../lib/indicators.js';
 
 const OPTION_INDICES = INDIAN_INDICES;
 const OPTION_TIMEFRAMES = {
@@ -59,6 +61,7 @@ export default function OptionsPanel({ selectedIndexId, onSelectIndex, yahooApiB
   const [expiryDate, setExpiryDate] = useState(() => getNextScheduledExpiryDate('nifty'));
   const [strike, setStrike] = useState('');
   const [optionType, setOptionType] = useState('CE');
+  const [autoDirection, setAutoDirection] = useState(true);
   const [contractUrlInput, setContractUrlInput] = useState('');
   const [analysisTimeframe, setAnalysisTimeframe] = useState('1h');
   const [premiumOverride, setPremiumOverride] = useState(null);
@@ -69,6 +72,9 @@ export default function OptionsPanel({ selectedIndexId, onSelectIndex, yahooApiB
   const [spotLoading, setSpotLoading] = useState(true);
   const [spotError, setSpotError] = useState('');
   const [analysis, setAnalysis] = useState(null);
+  const [backtestResult, setBacktestResult] = useState(null);
+  const [backtestLoading, setBacktestLoading] = useState(false);
+  const [backtestError, setBacktestError] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
@@ -148,7 +154,7 @@ export default function OptionsPanel({ selectedIndexId, onSelectIndex, yahooApiB
     setError('');
     setAnalysis(null);
     try {
-      const contract = parseGrowwOptionUrl(url);
+      let contract = parseGrowwOptionUrl(url);
       onSelectIndex(contract.indexId);
       if (getOptionExpiryStatus(contract.expiryDate) === 'expired') {
         setAnalysis({ contract, expired: true });
@@ -170,6 +176,21 @@ export default function OptionsPanel({ selectedIndexId, onSelectIndex, yahooApiB
       const candles = getClosedCandles(parseYahooCandles(result), result, analysisTimeframe);
       if (data.chart?.error || !candles.length) {
         throw new Error(data.chart?.error?.description || `No completed ${selectedTimeframe.label} index candles were returned.`);
+      }
+      const trend = getTrend(candles);
+      const detectedOptionType = trend === 'Bullish' ? 'CE' : trend === 'Bearish' ? 'PE' : null;
+      if (autoDirection && detectedOptionType && detectedOptionType !== contract.optionType) {
+        contract = { ...contract, optionType: detectedOptionType };
+        contract.symbol = contract.symbol.replace(/(CE|PE)$/, detectedOptionType);
+        setOptionType(detectedOptionType);
+        setExpiryDate(contract.expiryDate);
+        setStrike(String(contract.strike));
+        setContractUrlInput(buildGrowwOptionUrl({
+          indexId: contract.indexId,
+          expiryDate: contract.expiryDate,
+          strike: contract.strike,
+          optionType: detectedOptionType,
+        }));
       }
       const setup = buildOptionsTechnicalSetup(candles, contract.optionType, { interval: analysisTimeframe });
       const metaPrice = Number(result?.meta?.regularMarketPrice);
@@ -209,6 +230,42 @@ export default function OptionsPanel({ selectedIndexId, onSelectIndex, yahooApiB
     await analyzeContract(generatedUrl);
   }
 
+  async function runOptionBacktest() {
+    setBacktestLoading(true);
+    setBacktestError('');
+    setBacktestResult(null);
+    try {
+      const selectedTimeframe = OPTION_TIMEFRAMES[analysisTimeframe];
+      const params = new URLSearchParams({
+        interval: selectedTimeframe.interval,
+        range: selectedTimeframe.range,
+        events: 'div,splits',
+      });
+      const data = await fetchYahooJson(
+        `/api/yahoo/v8/finance/chart/${encodeURIComponent(selectedIndex.yahooSymbol)}?${params}`,
+        yahooApiBaseUrl,
+        { ttl: 30_000 },
+      );
+      const result = data.chart?.result?.[0];
+      const candles = getClosedCandles(parseYahooCandles(result), result, analysisTimeframe);
+      if (data.chart?.error || candles.length < 24) {
+        throw new Error(data.chart?.error?.description || `At least 24 completed ${selectedTimeframe.label} candles are required for a backtest.`);
+      }
+      setBacktestResult({
+        ...backtestSignals(candles, {
+          interval: analysisTimeframe,
+          timeZone: result?.meta?.exchangeTimezoneName || 'Asia/Kolkata',
+        }),
+        timeframe: selectedTimeframe.label,
+        timeZone: result?.meta?.exchangeTimezoneName || 'Asia/Kolkata',
+      });
+    } catch (backtestError) {
+      setBacktestError(backtestError.message || 'Unable to backtest the selected index.');
+    } finally {
+      setBacktestLoading(false);
+    }
+  }
+
   function loadContractFromUrl() {
     setError('');
     try {
@@ -217,6 +274,7 @@ export default function OptionsPanel({ selectedIndexId, onSelectIndex, yahooApiB
       setExpiryDate(contract.expiryDate);
       setStrike(String(contract.strike));
       setOptionType(contract.optionType);
+      setAutoDirection(false);
       setPremiumOverride(null);
       setAnalysis(null);
     } catch (urlError) {
@@ -230,6 +288,7 @@ export default function OptionsPanel({ selectedIndexId, onSelectIndex, yahooApiB
     setExpiryDate(getNextScheduledExpiryDate(index.id));
     setStrike('');
     setOptionType(index.id === 'sensex' ? 'PE' : 'CE');
+    setAutoDirection(true);
     setPremiumOverride(null);
     setLotCount('1');
     setCurrentSpot(null);
@@ -245,7 +304,9 @@ export default function OptionsPanel({ selectedIndexId, onSelectIndex, yahooApiB
   );
   const premiumValue = premiumInputValue.trim() === '' ? NaN : Number(premiumInputValue);
   const lotCountValue = Number(lotCount);
-  const lotSize = getOptionLotSize(selectedIndex.id);
+  const lotSize = Number.isInteger(activeOptionQuote?.quote?.lotSize) && activeOptionQuote.quote.lotSize > 0
+    ? activeOptionQuote.quote.lotSize
+    : getOptionLotSize(selectedIndex.id);
   const quantityValue = lotCountValue * lotSize;
   const hasOptionInputs = Number.isFinite(premiumValue) && premiumValue >= 0 &&
     Number.isInteger(lotCountValue) && lotCountValue >= 1 && lotCountValue <= 10;
@@ -283,7 +344,7 @@ export default function OptionsPanel({ selectedIndexId, onSelectIndex, yahooApiB
       </div>
       <div className="option-chain-info">
         <h3>{selectedIndex.name} option chain</h3>
-        <p>Open the Groww chain to choose an available expiry and strike. Enter those values below, then select CE or PE to build and analyze the contract.</p>
+        <p>Open the Groww chain to choose an available expiry and strike. Enter those values below; CE or PE can be selected automatically from the trend or overridden manually.</p>
         <a className="scan-button option-chain-link" href={`https://groww.in/options/${selectedIndex.id === 'sensex' ? 'sp-bse-sensex' : selectedIndex.id === 'banknifty' ? 'nifty-bank' : 'nifty'}`} target="_blank" rel="noreferrer">
           Open Groww {selectedIndex.name} option chain
         </a>
@@ -320,13 +381,24 @@ export default function OptionsPanel({ selectedIndexId, onSelectIndex, yahooApiB
         </div>
         <fieldset className="option-type-selector">
           <legend>Option type</legend>
+          <label className="option-auto-direction">
+            <input
+              type="checkbox"
+              checked={autoDirection}
+              onChange={(event) => setAutoDirection(event.target.checked)}
+            />
+            Auto-select CE/PE from trend
+          </label>
           {['CE', 'PE'].map((type) => (
             <button
               type="button"
               key={type}
               className={optionType === type ? 'selected' : ''}
               aria-pressed={optionType === type}
-              onClick={() => setOptionType(type)}
+              onClick={() => {
+                setOptionType(type);
+                setAutoDirection(false);
+              }}
             >
               {type === 'CE' ? 'Call (CE)' : 'Put (PE)'}
             </button>
@@ -405,6 +477,48 @@ export default function OptionsPanel({ selectedIndexId, onSelectIndex, yahooApiB
         {builderError && !spotLoading && <p className="options-error" role="status">{builderError}</p>}
         {error && <p className="options-error" role="alert">{error}</p>}
       </form>
+
+      <section className="option-backtest" aria-labelledby="option-backtest-title">
+        <h3 id="option-backtest-title">Historical option-direction backtest</h3>
+        <p className="subtle-note">
+          Runs the existing entry/exit strategy on historical {selectedIndex.name} candles for the selected timeframe.
+          CE/PE and levels are derived from the underlying. This is a points-based proxy, not historical option-premium or option-P&amp;L data.
+        </p>
+        <button className="scan-button" type="button" onClick={runOptionBacktest} disabled={backtestLoading}>
+          {backtestLoading ? 'Backtesting historical candles…' : `Backtest ${selectedIndex.name}`}
+        </button>
+        {backtestError && <p className="options-error" role="alert">{backtestError}</p>}
+        {backtestResult && (
+          <div className="option-backtest-result" aria-live="polite">
+            <p className="subtle-note">
+              {backtestResult.numberOfTrades} trades · {backtestResult.winRate.toFixed(1)}% wins ·
+              {' '}{backtestResult.averageR.toFixed(2)} average R · {backtestResult.timeframe}
+            </p>
+            {backtestResult.trades.length > 0 && (
+              <div className="option-scenario-table" role="table" aria-label="Historical underlying backtest trades">
+                <div className="option-backtest-row option-backtest-header" role="row">
+                  <span role="columnheader">Side</span>
+                  <span role="columnheader">Entry point</span>
+                  <span role="columnheader">Stop</span>
+                  <span role="columnheader">Target 1</span>
+                  <span role="columnheader">Exit point</span>
+                  <span role="columnheader">Underlying points</span>
+                </div>
+                {backtestResult.trades.map((trade) => (
+                  <div className="option-backtest-row" role="row" key={`${trade.entryTime}-${trade.exitTime}`}>
+                    <span role="cell">{trade.direction === 'Long' ? 'CE' : 'PE'} · {trade.outcome}</span>
+                    <span role="cell">{formatCandleDate(trade.entryTime, backtestResult.timeZone, analysisTimeframe)} · {formatPrice(trade.entryPrice)}</span>
+                    <span role="cell">{formatPrice(trade.stopPrice)}</span>
+                    <span role="cell">{formatPrice(trade.target1Price)}</span>
+                    <span role="cell">{formatCandleDate(trade.exitTime, backtestResult.timeZone, analysisTimeframe)} · {formatPrice(trade.exitPrice)}</span>
+                    <span role="cell">{trade.underlyingPointsPerUnit < 0 ? '−' : '+'}{formatPrice(Math.abs(trade.underlyingPointsPerUnit))}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+      </section>
 
       {analysis && (
         <section className="option-analysis-result" aria-live="polite">

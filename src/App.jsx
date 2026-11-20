@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { createChart, createSeriesMarkers, CandlestickSeries, LineSeries, HistogramSeries } from 'lightweight-charts';
 import { calculateATR, calculateEMA, calculateRSI, calculateVWAP, getTrend } from './lib/indicators.js';
-import { buildTradeLevels, findSupportResistance } from './lib/levels.js';
+import { buildLiquiditySweepTradeLevels, buildTradeLevels, findSupportResistance } from './lib/levels.js';
 import { backtestSignals, backtestSymbols } from './lib/backtest.js';
 import { updateTradeHistory } from './lib/tradeHistory.js';
 import { getMarketStatus } from './lib/marketStatus.js';
@@ -134,6 +134,12 @@ function formatExchangeTime(time, timeZone) {
   }).format(new Date(Number(time) * 1000));
 }
 
+function formatBacktestPrice(value) {
+  return value !== null && value !== undefined && Number.isFinite(Number(value))
+    ? Number(value).toFixed(2)
+    : '—';
+}
+
 function buildTradeMarkers(trades, candles) {
   const candleTimes = new Set(candles.map((candle) => candle.time));
   const markers = [];
@@ -229,11 +235,10 @@ function App() {
   const slippagePercentRef = useRef(slippagePercent);
   const [moveStopToBreakeven, setMoveStopToBreakeven] = useState(false);
   const [tradeDirection, setTradeDirection] = useState('Long');
-  const [selectedStrategy, setSelectedStrategy] = useState(() => (
-    loadPreference('techstock-signal-strategy', 'support-resistance') === 'price-action'
-      ? 'price-action'
-      : 'support-resistance'
-  ));
+  const [selectedStrategy, setSelectedStrategy] = useState(() => {
+    const saved = loadPreference('techstock-signal-strategy', 'support-resistance');
+    return ['price-action', 'liquidity-sweep'].includes(saved) ? saved : 'support-resistance';
+  });
   const [activeTab, setActiveTab] = useState(() => {
     const saved = loadPreference('techstock-workspace-tab', 'home');
     return ['home', 'chart', 'ideas', 'report', 'history', 'paper', 'options'].includes(saved) ? saved : 'home';
@@ -737,6 +742,20 @@ function App() {
         axisLabelVisible: true, title: `D-R${index + 1}`,
       }));
     }
+    if (data.strategy === 'liquidity-sweep') {
+      const pools = [
+        ...(data.liquidityPools?.supports || []).slice(0, 2),
+        ...(data.liquidityPools?.resistances || []).slice(0, 2),
+      ];
+      pools.forEach((pool) => addLine(series.candleSeries, {
+        price: pool.price,
+        color: themeColor(pool.price < Number(analysis?.price) ? '--up' : '--down'),
+        lineWidth: 1,
+        lineStyle: 3,
+        axisLabelVisible: true,
+        title: pool.type,
+      }));
+    }
     (data.priceActionZones || []).forEach((zone) => {
       const color = zone.type === 'FVG'
         ? themeColor(zone.direction === 'Long' ? '--accent' : '--warn')
@@ -753,15 +772,33 @@ function App() {
     });
     const lineEntry = Number(analysis?.price || 0);
     const currentLevels = analysis
-      ? buildTradeLevels({
-        direction: tradeDirection,
-        entry: lineEntry,
-        atr: Number(analysis.atr || 0),
-        supports: analysis.supports,
-        resistances: analysis.resistances,
-      })
+      ? selectedStrategy === 'liquidity-sweep' && analysis.setupDirection && analysis.liquiditySweep
+        ? buildLiquiditySweepTradeLevels({
+          direction: analysis.setupDirection,
+          entry: lineEntry,
+          sweepExtreme: analysis.liquiditySweep.sweepExtreme,
+          supports: analysis.liquidityPools?.supports || analysis.supports,
+          resistances: analysis.liquidityPools?.resistances || analysis.resistances,
+        })
+        : buildTradeLevels({
+          direction: tradeDirection,
+          entry: lineEntry,
+          atr: Number(analysis.atr || 0),
+          supports: analysis.supports,
+          resistances: analysis.resistances,
+        })
       : null;
     if (analysis && lineEntry > 0 && currentLevels) {
+      if (selectedStrategy === 'liquidity-sweep' && analysis.liquiditySweep) {
+        addLine(series.candleSeries, {
+          price: analysis.liquiditySweep.level,
+          title: analysis.liquiditySweep.poolType,
+          color: themeColor('--warn'),
+          lineWidth: 2,
+          lineStyle: 2,
+          axisLabelVisible: true,
+        });
+      }
       [
         ['Entry', lineEntry, themeColor('--accent')],
         ['Stop', currentLevels.stop, themeColor('--down')],
@@ -772,7 +809,7 @@ function App() {
       }));
     }
     return undefined;
-  }, [showVolume, showSR, analysis, tradeDirection, theme, isAuthenticated, activeTab]);
+  }, [showVolume, showSR, analysis, tradeDirection, selectedStrategy, theme, isAuthenticated, activeTab]);
 
   useEffect(() => {
     if (!isAuthenticated) return undefined;
@@ -927,10 +964,18 @@ function App() {
           resistances: levels.resistances,
           strategy: selectedStrategy,
           priceAction,
+          timeZone,
+          levelLookback,
         });
         const { support: nearestSupport, resistance: nearestResistance } = entrySignals;
         const { nearSupport, nearResistance, longSignal: bullishSignal, shortSignal: bearishSignal } = entrySignals;
         const usesPriceAction = selectedStrategy === 'price-action';
+        const usesLiquiditySweep = selectedStrategy === 'liquidity-sweep';
+        const activeSweep = bullishSignal
+          ? entrySignals.liquiditySweep.long
+          : bearishSignal
+            ? entrySignals.liquiditySweep.short
+            : null;
         const directionPoints = (direction) => {
           const isLong = direction === 'Long';
           const trendMatch = currentTrend === (isLong ? 'Bullish' : 'Bearish') && higherTrend === currentTrend;
@@ -944,7 +989,16 @@ function App() {
           const priceActionPoints = fvgRetest && orderBlockRetest ? 25
             : fvgRetest || orderBlockRetest ? 15
               : 0;
-          if (!usesPriceAction) {
+          if (usesLiquiditySweep) {
+            return (isLong ? entrySignals.longConditions : entrySignals.shortConditions)
+              .map((condition) => ({
+                label: condition.label,
+                points: condition.passed ? 100 / entrySignals.longConditions.length : 0,
+                maxPoints: 100 / entrySignals.longConditions.length,
+                reason: condition.passed ? 'Confirmed on the latest completed candle.' : 'Waiting for this condition.',
+              }));
+          }
+          if (!usesPriceAction && !usesLiquiditySweep) {
             return [
               { label: 'Trend alignment', points: trendMatch ? 25 : 0, maxPoints: 25, reason: trendMatch ? `${currentTrend} chart and ${higherLabel} trends agree.` : 'Chart and higher-timeframe trends do not align.' },
               { label: 'EMA alignment', points: emaMatch ? 15 : 0, maxPoints: 15, reason: emaMatch ? `EMA 9 is aligned for ${direction.toLowerCase()}.` : 'EMA 9/21 alignment does not support this direction.' },
@@ -973,7 +1027,11 @@ function App() {
         const shortScoreDetails = directionPoints('Short');
         const longScore = longScoreDetails.reduce((sum, item) => sum + item.points, 0);
         const shortScore = shortScoreDetails.reduce((sum, item) => sum + item.points, 0);
-        const entryIdea = bullishSignal
+        const entryIdea = usesLiquiditySweep
+          ? activeSweep
+            ? `${activeSweep.poolType} at ${activeSweep.level} swept and reclaimed; structure shifted. Stop reference: sweep ${activeSweep.direction === 'Long' ? 'low' : 'high'} at ${activeSweep.sweepExtreme}.`
+            : 'Wait for price to sweep a swing, equal-high/low, prior-period, or nearby round-number pool, then reclaim it with rejection and close beyond the prior candle extreme.'
+          : bullishSignal
           ? usesPriceAction
             ? `Closed candle confirmed near support at ${nearestSupport.price} with an FVG or order-block retest.`
             : `Closed candle confirmed near support at ${nearestSupport.price}.`
@@ -1019,15 +1077,17 @@ function App() {
               supports: historyLevels.supports,
               resistances: historyLevels.resistances,
               strategy: selectedStrategy,
+              timeZone,
+              levelLookback,
             });
             const { longSignal, shortSignal } = historicalSignals;
             if (longSignal) markersForCandles.push({
               time: candle.time, position: 'belowBar', shape: 'arrowUp',
-              text: usesPriceAction ? '▲ FVG/OB Long' : '▲ Long',
+              text: selectedStrategy === 'liquidity-sweep' ? '▲ Sweep Long' : usesPriceAction ? '▲ FVG/OB Long' : '▲ Long',
             });
             if (shortSignal) markersForCandles.push({
               time: candle.time, position: 'aboveBar', shape: 'arrowDown',
-              text: usesPriceAction ? '▼ FVG/OB Short' : '▼ Short',
+              text: selectedStrategy === 'liquidity-sweep' ? '▼ Sweep Short' : usesPriceAction ? '▼ FVG/OB Short' : '▼ Short',
             });
           });
           signalMarkers = markersForCandles;
@@ -1053,6 +1113,7 @@ function App() {
         }));
         const chartData = {
           candles, ema9, ema21, vwap, volume, rsi: rsiValues, levels, dailyLevels,
+          liquidityPools: entrySignals.liquidityPools,
           priceActionZones, signalMarkers, markers, timeZone,
           signalCandles, symbol: yahooSymbol, interval: timeframe,
           strategy: selectedStrategy, levelLookback,
@@ -1103,7 +1164,12 @@ function App() {
           setupDirection: activeDirection,
           checklistDirection,
           entryChecklist,
-          strategyName: usesPriceAction ? 'FVG & order-block confluence' : 'Support & resistance',
+          strategyName: usesLiquiditySweep
+            ? 'Liquidity sweep + structure shift'
+            : usesPriceAction ? 'FVG & order-block confluence' : 'Support & resistance',
+          liquiditySweep: activeSweep,
+          liquidityPools: entrySignals.liquidityPools,
+          timeZone,
           timeframe,
           longScore,
           shortScore,
@@ -1364,13 +1430,21 @@ function App() {
   const investmentAmount = Number(sizingMode === 'capital' ? investment : capital);
   const entryPrice = Number(analysis?.price || 0);
   const tradeLevels = analysis
-    ? buildTradeLevels({
-      direction: tradeDirection,
-      entry: entryPrice,
-      atr: Number(analysis.atr || 0),
-      supports: analysis.supports,
-      resistances: analysis.resistances,
-    })
+    ? selectedStrategy === 'liquidity-sweep' && analysis.setupDirection && analysis.liquiditySweep
+      ? buildLiquiditySweepTradeLevels({
+        direction: analysis.setupDirection,
+        entry: entryPrice,
+        sweepExtreme: analysis.liquiditySweep.sweepExtreme,
+        supports: analysis.supports,
+        resistances: analysis.resistances,
+      })
+      : buildTradeLevels({
+        direction: tradeDirection,
+        entry: entryPrice,
+        atr: Number(analysis.atr || 0),
+        supports: analysis.supports,
+        resistances: analysis.resistances,
+      })
     : { stop: 0, stopDistance: 0, target1: 0, target2: 0, method: 'ATR fallback' };
   const riskPerShare = tradeLevels.stopDistance;
   const maxCapitalShares = entryPrice > 0 && investmentAmount > 0 ? Math.floor(investmentAmount / entryPrice) : 0;
@@ -1881,6 +1955,17 @@ function App() {
           FVG &amp; order-block confluence
           <small>Original checks plus a confirmed FVG/OB retest.</small>
         </label>
+        <label>
+          <input
+            type="radio"
+            name="signal-strategy"
+            value="liquidity-sweep"
+            checked={selectedStrategy === 'liquidity-sweep'}
+            onChange={() => setSelectedStrategy('liquidity-sweep')}
+          />
+          Liquidity sweep + structure shift
+          <small>Swing/equal and prior-period pools; wait for sweep, reclaim, rejection, and structure shift. Volume expansion is context only.</small>
+        </label>
       </fieldset>
       <section className="watchlist-panel" aria-label={`${market} watchlist`}>
         <div className="watchlist-heading">
@@ -2151,7 +2236,9 @@ function App() {
             <p className="subtle-note">
               {selectedStrategy === 'price-action'
                 ? 'This simulation requires a confirmed FVG or order-block retest together with the existing EMA, candle, and nearby support/resistance checks.'
-                : 'This simulation uses the original EMA, candle, and nearby support/resistance rules.'}
+                : selectedStrategy === 'liquidity-sweep'
+                  ? 'This simulation tests swing and equal highs/lows, previous-session/week/month extremes, and nearby round numbers. It requires a sweep, reclaim with rejection, and a close beyond the prior candle extreme; volume expansion is context, not a required filter. Entry is next candle open, stop is the sweep extreme, and targets use a nearby opposing pool when it is within a defined risk range, otherwise 1R/2R.'
+                  : 'This simulation uses the original EMA, candle, and nearby support/resistance rules.'}
               {' '}The chart simulation uses loaded historical candles; the optional watchlist test below fetches data for up to five symbols. These are simplified heuristics, not predictions.
             </p>
             <button type="button" className="scan-button" onClick={runWatchlistBacktest} disabled={watchlistBacktestLoading}>
@@ -2195,6 +2282,48 @@ function App() {
                     <div className="metric"><span>Out-of-sample net</span><strong>{(backtestResult.outOfSample?.net?.totalPnl ?? 0).toFixed(2)}</strong></div>
                     <div className="metric"><span>In-sample avg R</span><strong>{(backtestResult.inSample?.averageR ?? 0).toFixed(2)}R</strong></div>
                     <div className="metric"><span>Out-of-sample avg R</span><strong>{(backtestResult.outOfSample?.averageR ?? 0).toFixed(2)}R</strong></div>
+                  </div>
+                )}
+                {selectedStrategy === 'liquidity-sweep' && backtestResult.trades.length > 0 && (
+                  <div className="liquidity-backtest">
+                    <h3>Recent simulated sweep trades</h3>
+                    <div className="liquidity-backtest-wrap">
+                      <table>
+                        <thead>
+                          <tr>
+                            <th>Entry time</th>
+                            <th>Side</th>
+                            <th>Entry</th>
+                            <th>Liquidity pool</th>
+                            <th>Pool level</th>
+                            <th>Sweep extreme</th>
+                            <th>Sweep stop</th>
+                            <th>Target 1</th>
+                            <th>Exit</th>
+                            <th>Result</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {[...backtestResult.trades].slice(-15).reverse().map((trade) => (
+                            <tr key={`${trade.entryTime}-${trade.exitTime}`}>
+                              <td>{formatExchangeTime(trade.entryTime, analysis.timeZone || 'UTC')}</td>
+                              <td>{trade.direction}</td>
+                              <td>{formatBacktestPrice(trade.entryPrice)}</td>
+                              <td>{trade.liquidityPoolType || '—'}</td>
+                              <td>{formatBacktestPrice(trade.liquidityLevel)}</td>
+                              <td>{formatBacktestPrice(trade.sweepExtreme)}</td>
+                              <td>{formatBacktestPrice(trade.stopPrice)}</td>
+                              <td>{formatBacktestPrice(trade.target1Price)}</td>
+                              <td>{formatBacktestPrice(trade.exitPrice)}</td>
+                              <td>{formatBacktestPrice(trade.rMultiple)}R · {trade.outcome || '—'}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                    <p className="subtle-note">
+                      Showing up to 15 recent trades. Entries are simulated at the next candle open; the stop is the sweep extreme. Results are underlying-price simulations, not option-premium returns. Liquidity pools and volume expansion are inferred from OHLCV bars; they do not reveal actual resting orders, volume-profile nodes, or institutional intent.
+                    </p>
                   </div>
                 )}
                 <p className="subtle-note">

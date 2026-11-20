@@ -18,6 +18,8 @@ import {
 import { clearGrowwQuoteCache, fetchGrowwOptionQuote } from './groww.js';
 import { evaluateEntrySignals, getSignalLevelLookback } from './signalRules.js';
 import { backtestSignals, backtestSymbols } from './backtest.js';
+import { buildLiquiditySweepTradeLevels } from './levels.js';
+import { getLiquidityPools } from './liquidity.js';
 import viteConfig from '../../vite.config.js';
 import {
   calculatePositionPnl,
@@ -94,7 +96,7 @@ describe('market-data utilities', () => {
     expect(getNextScheduledExpiryDate('banknifty', new Date('2026-11-24T12:00:00Z'))).toBe('2026-12-29');
     expect(getNextScheduledExpiryDate('nifty', new Date('2026-11-20T12:00:00Z'))).toBe('2026-11-24');
     expect(getOptionLotSize('nifty')).toBe(65);
-    expect(getOptionLotSize('banknifty')).toBe(15);
+    expect(getOptionLotSize('banknifty')).toBe(30);
     expect(getOptionLotSize('sensex')).toBe(20);
     expect(calculateOptionExpiryPnl('CE', 63100, 114.55, 63200, 150).totalPnl).toBeCloseTo(-2182.5);
     expect(() => buildGrowwOptionUrl({
@@ -183,6 +185,19 @@ describe('market-data utilities', () => {
     );
   });
 
+  it('prefers the lot size returned with a Groww option quote', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ ltp: 149.9, lotSize: 30 }),
+    }));
+    const contract = parseGrowwOptionUrl('https://groww.in/options/nifty-bank/BANKNIFTY26NOV52000CE');
+
+    await expect(fetchGrowwOptionQuote(contract)).resolves.toMatchObject({
+      ltp: 149.9,
+      lotSize: 30,
+    });
+  });
+
   it('uses the same required entry checks for both strategy modes', () => {
     const candles = [{ time: 1, open: 100, high: 101, low: 99.7, close: 100.5, volume: 100 }];
     const levels = {
@@ -209,6 +224,179 @@ describe('market-data utilities', () => {
       strategy: 'price-action',
       priceAction: { longRetest: true, shortRetest: false },
     }).longSignal).toBe(true);
+  });
+
+  it('requires a swept and reclaimed liquidity pool plus a structure shift', () => {
+    const longCandles = [
+      { time: 1, open: 100.5, high: 101, low: 100, close: 100.7, volume: 100 },
+      { time: 2, open: 100.4, high: 102, low: 99.5, close: 101.5, volume: 140 },
+    ];
+    const longSignal = evaluateEntrySignals({
+      candles: longCandles,
+      index: 1,
+      atr: 1,
+      supports: [{ price: 100, touches: 2 }],
+      resistances: [],
+      strategy: 'liquidity-sweep',
+    });
+
+    expect(longSignal.longSignal).toBe(true);
+    expect(longSignal.liquiditySweep.long).toMatchObject({
+      poolType: 'Equal lows',
+      level: 100,
+      sweepExtreme: 99.5,
+    });
+    expect(longSignal.shortSignal).toBe(false);
+    const sweepWithoutVolumeExpansion = evaluateEntrySignals({
+      candles: [longCandles[0], { ...longCandles[1], volume: 100 }],
+      index: 1,
+      atr: 1,
+      supports: [{ price: 100, touches: 2 }],
+      strategy: 'liquidity-sweep',
+    });
+    expect(sweepWithoutVolumeExpansion.longSignal).toBe(true);
+    expect(sweepWithoutVolumeExpansion.longConditions.at(-1)).toMatchObject({
+      label: 'Sweep volume expanded (context only)',
+      passed: false,
+      required: false,
+    });
+
+    const directBreak = evaluateEntrySignals({
+      candles: [
+        longCandles[0],
+        { ...longCandles[1], close: 99.8 },
+      ],
+      index: 1,
+      atr: 1,
+      supports: [{ price: 100, touches: 2 }],
+      strategy: 'liquidity-sweep',
+    });
+    expect(directBreak.longSignal).toBe(false);
+
+    const shortSignal = evaluateEntrySignals({
+      candles: [
+        { time: 1, open: 101, high: 101.5, low: 100.5, close: 101, volume: 100 },
+        { time: 2, open: 101.4, high: 102.3, low: 99.7, close: 100, volume: 140 },
+      ],
+      index: 1,
+      atr: 1,
+      supports: [],
+      resistances: [{ price: 101.5, touches: 1 }],
+      strategy: 'liquidity-sweep',
+    });
+    expect(shortSignal.shortSignal).toBe(true);
+    expect(shortSignal.liquiditySweep.short).toMatchObject({
+      poolType: 'Swing-high liquidity',
+      level: 101.5,
+      sweepExtreme: 102.3,
+    });
+  });
+
+  it('sets liquidity-sweep stops at the sweep extreme and targets at 1R/2R or opposing pools', () => {
+    expect(buildLiquiditySweepTradeLevels({
+      direction: 'Long',
+      entry: 101,
+      sweepExtreme: 99,
+      resistances: [{ price: 103 }, { price: 105 }],
+    })).toMatchObject({
+      stop: 99,
+      stopDistance: 2,
+      target1: 103,
+      target2: 105,
+    });
+    expect(buildLiquiditySweepTradeLevels({
+      direction: 'Short',
+      entry: 99,
+      sweepExtreme: 101,
+    })).toMatchObject({
+      stop: 101,
+      stopDistance: 2,
+      target1: 97,
+      target2: 95,
+    });
+    expect(buildLiquiditySweepTradeLevels({
+      direction: 'Long',
+      entry: 98,
+      sweepExtreme: 99,
+    }).stopDistance).toBe(0);
+  });
+
+  it('finds equal-high, previous-session, previous-week, previous-month, and round-number liquidity', () => {
+    const start = Date.parse('2026-01-15T12:00:00Z') / 1000;
+    const equalHighCandles = Array.from({ length: 13 }, (_, index) => ({
+      time: start + index * 60,
+      open: 10,
+      high: index === 2 ? 12 : index === 8 ? 12.004 : 11,
+      low: 10,
+      close: 10.5,
+      volume: 100,
+    }));
+    equalHighCandles[12] = { ...equalHighCandles[12], high: 11.7, close: 11.4 };
+    const equalHighPools = getLiquidityPools(equalHighCandles, 12, { timeZone: 'UTC' });
+    expect(equalHighPools.resistances).toContainEqual(expect.objectContaining({ type: 'Equal highs', touches: 2 }));
+
+    const periodCandles = [
+      { time: Date.parse('2026-01-15T12:00:00Z') / 1000, open: 110, high: 115, low: 85, close: 105, volume: 100 },
+      { time: Date.parse('2026-01-26T12:00:00Z') / 1000, open: 105, high: 112, low: 88, close: 106, volume: 100 },
+      { time: Date.parse('2026-01-27T12:00:00Z') / 1000, open: 106, high: 108, low: 92, close: 103, volume: 100 },
+      { time: Date.parse('2026-02-02T12:00:00Z') / 1000, open: 100, high: 104, low: 96, close: 100, volume: 100 },
+    ];
+    const pools = getLiquidityPools(periodCandles, 3, { timeZone: 'UTC' });
+    expect(pools.resistances).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: 'Previous-session high', price: 108 }),
+      expect.objectContaining({ type: 'Previous-week high', price: 112 }),
+      expect.objectContaining({ type: 'Previous-month high', price: 115 }),
+      expect.objectContaining({ type: 'Round-number liquidity', price: 110 }),
+    ]));
+    expect(pools.supports).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: 'Previous-session low', price: 92 }),
+      expect.objectContaining({ type: 'Previous-week low', price: 88 }),
+      expect.objectContaining({ type: 'Previous-month low', price: 85 }),
+      expect.objectContaining({ type: 'Round-number liquidity', price: 90 }),
+    ]));
+  });
+
+  it('backtests liquidity sweeps with next-candle entries and sweep-extreme stops', () => {
+    const start = Date.parse('2026-03-02T10:00:00Z') / 1000;
+    const candles = Array.from({ length: 90 }, (_, index) => {
+      const close = 100 + Math.sin(index / 2) * 0.35 + index * 0.015;
+      return {
+        time: start + index * 60,
+        open: close - 0.05,
+        high: close + 0.2,
+        low: close - 0.2,
+        close,
+        volume: 100,
+      };
+    });
+    for (const index of [25, 34, 43, 52, 61, 70, 79]) {
+      const previous = candles[index - 1];
+      const open = previous.high - 0.1;
+      const close = previous.high + 0.15;
+      candles[index] = {
+        ...candles[index],
+        open,
+        high: close + 0.2,
+        low: 99.55,
+        close,
+        volume: 220,
+      };
+    }
+
+    const result = backtestSignals(candles, {
+      interval: '1min',
+      timeZone: 'UTC',
+      strategy: 'liquidity-sweep',
+    });
+
+    expect(result.numberOfTrades).toBeGreaterThan(0);
+    expect(result.trades.every((trade) => (
+      trade.stopPrice === trade.sweepExtreme &&
+      trade.liquidityPoolType &&
+      trade.liquidityLevel < trade.entryPrice &&
+      trade.entryTime > 0
+    ))).toBe(true);
+    expect(result.outOfSample.numberOfTrades).toBeGreaterThan(0);
   });
 
   it('shares each chart timeframe lookback with signal calculations', () => {
@@ -314,6 +502,13 @@ describe('market-data utilities', () => {
     expect(originalStrategy.numberOfTrades).toBeGreaterThan(priceActionStrategy.numberOfTrades);
     expect(originalStrategy.numberOfTrades).toBeGreaterThan(0);
     expect(originalStrategy.trades.every((trade) => trade.tradingCosts === 0 && trade.pnl === trade.grossPnl)).toBe(true);
+    expect(originalStrategy.trades.every((trade) => (
+      Number.isFinite(trade.entryPrice) &&
+      Number.isFinite(trade.exitPrice) &&
+      Number.isFinite(trade.stopPrice) &&
+      Number.isFinite(trade.target1Price) &&
+      Number.isFinite(trade.underlyingPointsPerUnit)
+    ))).toBe(true);
     expect(brokerageBacktest.trades.every((trade) => (
       trade.tradingCosts === (trade.partialTargetReached ? 9 : 6)
     ))).toBe(true);

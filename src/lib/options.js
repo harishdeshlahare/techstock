@@ -8,7 +8,7 @@ const MONTHS = {
 
 const INDEX_DETAILS = {
   NIFTY: { id: 'nifty', slug: 'nifty', yahooSymbol: '^NSEI', strikeStep: 50, lotSize: 65 },
-  BANKNIFTY: { id: 'banknifty', slug: 'nifty-bank', yahooSymbol: '^NSEBANK', strikeStep: 100, lotSize: 15 },
+  BANKNIFTY: { id: 'banknifty', slug: 'nifty-bank', yahooSymbol: '^NSEBANK', strikeStep: 100, lotSize: 30 },
   SENSEX: { id: 'sensex', slug: 'sp-bse-sensex', yahooSymbol: '^BSESN', strikeStep: 100, lotSize: 20 },
 };
 

@@ -81,3 +81,44 @@ export function buildTradeLevels({ direction = 'Long', entry, atr, supports = []
     method: useStructure ? 'Structural support/resistance' : 'ATR fallback',
   };
 }
+
+export function buildLiquiditySweepTradeLevels({ direction = 'Long', entry, sweepExtreme, supports = [], resistances = [] }) {
+  if (!Number.isFinite(entry) || entry <= 0 || !Number.isFinite(sweepExtreme) || sweepExtreme <= 0) {
+    return { stop: 0, stopDistance: 0, target1: 0, target2: 0, method: 'Liquidity sweep' };
+  }
+  const isLong = direction === 'Long';
+  if (isLong ? sweepExtreme >= entry : sweepExtreme <= entry) {
+    return { stop: sweepExtreme, stopDistance: 0, target1: 0, target2: 0, method: 'Liquidity sweep' };
+  }
+  const stopDistance = Math.abs(entry - sweepExtreme);
+  if (stopDistance <= 0) {
+    return { stop: sweepExtreme, stopDistance: 0, target1: 0, target2: 0, method: 'Liquidity sweep' };
+  }
+  const minimumTarget1 = isLong ? entry + stopDistance : entry - stopDistance;
+  const minimumTarget2 = isLong ? entry + stopDistance * 2 : entry - stopDistance * 2;
+  const maximumTarget1 = isLong ? entry + stopDistance * 2 : entry - stopDistance * 2;
+  const maximumTarget2 = isLong ? entry + stopDistance * 5 : entry - stopDistance * 5;
+  const opposingPools = (isLong ? resistances : supports)
+    .map((level) => level.price)
+    .filter((price) => Number.isFinite(price) && (isLong ? price > entry : price < entry))
+    .sort((first, second) => isLong ? first - second : second - first);
+  const target1Pool = opposingPools.find((price) => (
+    (isLong ? price >= minimumTarget1 && price <= maximumTarget1 : price <= minimumTarget1 && price >= maximumTarget1)
+  ));
+  const target1 = target1Pool ?? minimumTarget1;
+  const target2Pool = opposingPools.find((price) => (
+    (isLong
+      ? price > target1 && price >= minimumTarget2 && price <= maximumTarget2
+      : price < target1 && price <= minimumTarget2 && price >= maximumTarget2)
+  ));
+  const target2 = target2Pool ?? (isLong
+    ? Math.max(minimumTarget2, target1 + stopDistance)
+    : Math.min(minimumTarget2, target1 - stopDistance));
+  return {
+    stop: sweepExtreme,
+    stopDistance,
+    target1,
+    target2,
+    method: 'Liquidity sweep extreme',
+  };
+}

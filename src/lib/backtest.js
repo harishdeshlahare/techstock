@@ -1,5 +1,5 @@
 import { calculateATR, calculateEMA } from './indicators.js';
-import { buildTradeLevels, findSupportResistance } from './levels.js';
+import { buildLiquiditySweepTradeLevels, buildTradeLevels, findSupportResistance } from './levels.js';
 import { evaluateEntrySignals, getSignalLevelLookback } from './signalRules.js';
 
 function summarize(trades) {
@@ -74,6 +74,8 @@ function simulate(candles, startIndex, endIndex, indicators, interval, timeZone,
       supports: levels.supports,
       resistances: levels.resistances,
       strategy,
+      timeZone,
+      levelLookback,
     });
     const { longSignal, shortSignal } = signal;
     if (!longSignal && !shortSignal) continue;
@@ -81,6 +83,10 @@ function simulate(candles, startIndex, endIndex, indicators, interval, timeZone,
     const direction = longSignal ? 'Long' : 'Short';
     const entryCandle = candles[index + 1];
     const entry = entryCandle.open;
+    const activeSweep = strategy === 'liquidity-sweep'
+      ? signal.liquiditySweep[direction === 'Long' ? 'long' : 'short']
+      : null;
+    if (activeSweep && (direction === 'Long' ? entry <= activeSweep.level : entry >= activeSweep.level)) continue;
     const plan = buildTradeLevels({
       direction,
       entry,
@@ -88,6 +94,16 @@ function simulate(candles, startIndex, endIndex, indicators, interval, timeZone,
       supports: levels.supports,
       resistances: levels.resistances,
     });
+    if (strategy === 'liquidity-sweep') {
+      Object.assign(plan, buildLiquiditySweepTradeLevels({
+        direction,
+        entry,
+        sweepExtreme: activeSweep.sweepExtreme,
+        supports: signal.liquidityPools.supports,
+        resistances: signal.liquidityPools.resistances,
+      }));
+      if (plan.stopDistance > atr * 2.5) continue;
+    }
     if (!(plan.stopDistance > 0)) continue;
 
     let exitIndex = -1;
@@ -150,6 +166,22 @@ function simulate(candles, startIndex, endIndex, indicators, interval, timeZone,
       exitTime: candles[exitIndex].time,
       direction,
       outcome,
+      entryPrice: entry,
+      exitPrice,
+      stopPrice: plan.stop,
+      liquidityLevel: strategy === 'liquidity-sweep'
+        ? activeSweep.level
+        : null,
+      liquidityPoolType: strategy === 'liquidity-sweep'
+        ? activeSweep.poolType
+        : null,
+      sweepExtreme: strategy === 'liquidity-sweep'
+        ? activeSweep.sweepExtreme
+        : null,
+      target1Price: plan.target1,
+      target2Price: plan.target2,
+      stopMethod: plan.method,
+      underlyingPointsPerUnit: grossPnl / 2,
       partialTargetReached: target1Reached,
       grossPnl,
       tradingCosts,

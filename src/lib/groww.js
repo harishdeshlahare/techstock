@@ -41,9 +41,12 @@ export async function fetchGrowwOptionQuote(contract, options = {}) {
   }
 
   const timestamp = Number(payload.tsInMillis);
+  const reportedLotSize = Number(payload.lotSize ?? payload.lot_size ?? payload.marketLot);
   const quote = {
     ltp,
-    lotSize: getOptionLotSize(contract.indexId),
+    lotSize: Number.isInteger(reportedLotSize) && reportedLotSize > 0
+      ? reportedLotSize
+      : getOptionLotSize(contract.indexId),
     timestamp: Number.isFinite(timestamp) ? timestamp * (timestamp < 1e12 ? 1000 : 1) : null,
   };
   quoteCache.set(url, { data: quote, expiresAt: Date.now() + 5_000 });
