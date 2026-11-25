@@ -1,0 +1,52 @@
+# TechStock
+
+Stock search and chart data use Yahoo Finance. During development, browser requests go through the Vite proxy at `/api/yahoo` to avoid Yahoo's browser CORS restriction.
+
+## Android/APK market-data setup
+
+The Vite development proxy is not included in a static build or APK. An APK therefore needs an internet-accessible HTTPS server that forwards `/api/yahoo/*` to `https://query1.finance.yahoo.com/*` and `/api/groww/*` to `https://groww.in/v1/api/*`, preserving paths. In the app, open **Preferences**, enter your proxy server URL (for example `https://your-server.com`), save it, and use **Test market-data connection**. The app adds each API route automatically; a URL ending in `/api/yahoo` is also accepted. The setting is stored on the device. Do not enter either data provider URL directly; the app expects a separate proxy server.
+
+For a fixed proxy URL at build time, set `VITE_YAHOO_API_BASE_URL` to the complete proxy URL before running `npm run build`. A configured endpoint must be served over HTTPS outside localhost. Yahoo may still rate-limit or deny requests independently of the app.
+
+## Build and install the Android APK
+
+Capacitor is configured for Android. To refresh the Android project after changing the web app, run `npm run android:sync`, then run `npm run android:open` to open it in Android Studio. In Android Studio, wait for Gradle sync, then choose **Build > Build Bundle(s) / APK(s) > Build APK(s)**. The debug APK is written to `android/app/build/outputs/apk/debug/app-debug.apk`.
+
+To install it, copy `app-debug.apk` to the phone and open the file, allowing Android to install apps from that source if prompted. Alternatively, connect a phone with USB debugging enabled and run `adb install -r android/app/build/outputs/apk/debug/app-debug.apk` from the project folder. This debug APK is for testing; use Android Studio's signed APK flow for a distributable release.
+
+The APK contains the frontend only. Vite's development proxy and the local paper-trading server are not included. Configure an internet-accessible HTTPS Yahoo proxy in Preferences for chart/search data. Paper trading also needs a reachable backend URL; never point the phone at `localhost` (that refers to the phone itself), and do not expose the current unauthenticated backend publicly.
+
+The interface includes responsive controls, touch-sized mobile actions, safe-area padding, and Dark, Light, and Ocean themes. Theme preference is stored on the device.
+
+The app opens with a demo login screen. Demo credentials are `hd` / `hd`. This client-side check is only a UI gate; it does not protect data or replace server-side authentication.
+
+The chart includes EMA 9/21, intraday session VWAP, pivot-based support/resistance levels, exchange-timezone labels, closed-candle signals, and higher-timeframe context. Directional component scores are heuristics, not win probabilities. The illustrative calculator uses structural stop/target levels with an ATR fallback, and supports capital- or risk-based share sizing plus user-entered brokerage and slippage assumptions; it does not estimate taxes.
+
+Choose between the original support/resistance strategy and FVG/order-block confluence with the chart's strategy radio buttons; your choice is saved in this browser. The chart marks active fair-value-gap (three-candle gap) and heuristic order-block zones. In confluence mode, a signal requires a confirmed retest of either zone, a matching candle/EMA direction, and nearby pivot support/resistance. The entry checklist and backtest share the same signal rules and timeframe-specific support/resistance lookback. The confluence score is context, not a probability; neither strategy is a validated guarantee or investment advice.
+
+Save a calculator scenario to the Stock history tab to keep its entry zone, stop, two targets, direction, and timeframe in this browser. Trades remain pending until a later candle touches the entry zone, then track T1, T2, and the stop on subsequent chart loads. Older scenarios outside the available candle range are marked unchecked/expired. If one candle touches the stop and a target, the order is unknown. A candle-level hit time is not an exact intrabar execution time. The chart also shows an explicitly limited backtest on the currently loaded data. It reports gross and cost-adjusted net P&L using the calculator's brokerage-per-order and slippage assumptions, models two shares per trade to support a 50% exit at target 1, and splits each symbol's candles chronologically 70/30. Stops crossed by a candle opening gap use that open; remaining trades are marked closed at the sample's last candle. The optional watchlist test fetches history for the selected stock and up to four watchlist stocks, then evaluates each independently; combined P&L is not capital-weighted or a portfolio simulation. Taxes are excluded. These small historical samples are not broad-market validation or predictions of future results.
+
+The per-stock Trade report summarizes saved outcomes, P&L, R multiples, holding time, and drawdown, with CSV and print exports. Open, pending, expired, and ambiguous scenarios are kept separate from closed-trade performance statistics; historical results are not predictions.
+
+The Intraday ideas tab scans a curated liquid-stock universe with Yahoo daily candles for average share volume, relative volume from completed candles, ATR%, directional RSI/trend, and proximity to support/resistance. The scan is a shortlist only: volume is not time-of-day adjusted, so confirm candidates on the intraday chart before acting. Exchange open/closed status uses local session hours and weekdays; it does not include exchange holidays.
+
+Search for `NIFTY`, `Bank Nifty`, or `Sensex` in the India market to open their Yahoo Finance index charts and add them to your watchlist. Add searched stocks to the Intraday ideas list with the `+ Intraday list` action; custom symbols persist in this browser and can be removed from the scanner tab. The Index options tab supports Groww NIFTY, NIFTY BANK, and SENSEX chains, loads the current underlying index quote where available, and suggests a nearby strike and next scheduled monthly expiry. Contract symbols use Groww's two-digit year/month format; the displayed expiry is calculated for that index and month, so an older symbol such as `BANKNIFTY24NOV63100CE` resolves to its November 2024 expiry rather than a 2026 date. Confirm holiday-adjusted dates and contract availability on Groww. Paste an existing Groww contract URL to select that exact contract, or build one by choosing a scheduled monthly expiry and strike. The option premium is fetched for the selected symbol from Groww's delayed quote endpoint and can be manually overridden; refresh to request the latest available quote. Lot counts from 1 to 10 convert to units using the configured lot sizes (NIFTY 65, NIFTY BANK 30, SENSEX 20); verify current lot size with Groww. Select a daily, hourly, or 1/5/15-minute timeframe for underlying index technical levels; the levels are calculated from closed candles of that interval. Option expiry payoff scenarios use the current or overridden premium and quantity; they show expiry-only intrinsic value, not projected pre-expiry option prices, and exclude costs. Expired contracts do not show stale setups. Groww quotes are delayed unless logged in to Groww.
+
+## Development
+
+Run `npm run dev` and open the local Vite URL. Keep the dev server running while using Yahoo search and charts. Yahoo may throttle or deny requests independently; the proxy cannot override those restrictions.
+
+## Deployment
+
+The Vercel deployment uses a same-origin rewrite for `/api/yahoo/*` requests, forwarding them to `https://query1.finance.yahoo.com/*` while preserving the query string. The rewrite is configured in `vercel.json`. Other static hosts must configure an equivalent reverse proxy; a static build alone does not include one.
+
+Paper trading stores separate US and India accounts in this browser. Each market has its own starting cash, positions, and simulated orders. The accounts are not shared across browsers or devices and are not stored in the Render backend.
+
+In the Paper trading tab, open positions show live-fetch-based unrealized and total marked P&L, and **Sell all** submits a confirmed simulated sell at the latest fetched Yahoo price. Set stop-loss and target values per position to display an alert when the observed price reaches either level. These limits are stored in the current browser and do not automatically submit orders; keep the tab open to monitor them.
+
+## Commands
+
+- `npm run dev` — start local development server with Yahoo proxy
+- `npm run build` — build static production assets
+- `npm test` — run the Vitest unit tests
+- `npm run preview` — preview the build (also uses Vite's configured proxy)
